@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Homelens — Pipeline Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e8f0;
+      --muted: #6b7280;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #eab308;
+      --blue: #3b82f6;
+      --purple: #a855f7;
+      --orange: #f97316;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      padding: 24px;
+    }
+
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    h2 { font-size: 14px; font-weight: 600; text-transform: uppercase;
+         letter-spacing: 0.08em; color: var(--muted); margin-bottom: 12px; }
+
+    .header {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .header-sub { color: var(--muted); font-size: 12px; }
+
+    /* ── Stat cards ────────────────────────────────────────── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase;
+                  letter-spacing: 0.06em; margin-bottom: 6px; }
+    .stat-value { font-size: 26px; font-weight: 700; }
+    .stat-sub   { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+    /* ── Section card ──────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    /* ── Run history ───────────────────────────────────────── */
+    .run-list { list-style: none; }
+    .run-item {
+      border-bottom: 1px solid var(--border);
+      padding: 10px 0;
+      display: grid;
+      grid-template-columns: 100px 90px 80px 80px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    .run-item:last-child { border-bottom: none; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-success { background: rgba(34,197,94,0.15); color: var(--green); }
+    .badge-failed  { background: rgba(239,68,68,0.15);  color: var(--red); }
+    .badge-manual  { background: rgba(59,130,246,0.15); color: var(--blue); }
+    .badge-scheduled { background: rgba(168,85,247,0.15); color: var(--purple); }
+
+    /* ── Step breakdown ────────────────────────────────────── */
+    .steps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .step-pill {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .step-name  { color: var(--text); flex: 1; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+    .step-dur   { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot-success  { background: var(--green); }
+    .dot-failed   { background: var(--red); }
+    .dot-skipped  { background: var(--muted); }
+
+    /* ── Sources ───────────────────────────────────────────── */
+    .source-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .source-chip {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 12px;
+      font-size: 12px;
+    }
+    .source-chip span { color: var(--blue); font-weight: 600; }
+
+    /* ── Recent runs table ─────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; color: var(--muted); font-size: 11px;
+         text-transform: uppercase; letter-spacing: 0.05em;
+         padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    td { padding: 8px; border-bottom: 1px solid rgba(42,45,58,0.5); }
+    tr:last-child td { border-bottom: none; }
+
+    /* ── Collapsible run detail ────────────────────────────── */
+    details summary { cursor: pointer; list-style: none; }
+    details summary::-webkit-details-marker { display: none; }
+    details[open] summary .arrow { transform: rotate(90deg); }
+    .arrow { display: inline-block; transition: transform 0.15s; margin-right: 4px; }
+
+    /* ── Misc ──────────────────────────────────────────────── */
+    .muted { color: var(--muted); }
+    .green { color: var(--green); }
+    .red   { color: var(--red); }
+    .refresh-btn {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); cursor: pointer; padding: 4px 12px; font-family: inherit;
+      font-size: 12px; margin-left: auto;
+    }
+    .refresh-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .header-row { display: flex; align-items: center; margin-bottom: 12px; }
+
+    .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Homelens</h1>
+  <span class="header-sub">Pipeline Dashboard</span>
+  <span class="header-sub" id="last-refresh" style="margin-left:auto"></span>
+</div>
+
+<!-- ── Live stat cards ──────────────────────────────────────── -->
+<div class="stat-grid" id="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Listings</div>
+    <div class="stat-value" id="stat-total">—</div>
+    <div class="stat-sub">active in Supabase</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Scored</div>
+    <div class="stat-value" id="stat-scored">—</div>
+    <div class="stat-sub">with investment score</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Last Run</div>
+    <div class="stat-value" id="stat-last-run" style="font-size:14px;padding-top:4px">—</div>
+    <div class="stat-sub" id="stat-last-status"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Run Frequency</div>
+    <div class="stat-value" style="font-size:16px;padding-top:4px">07:00 &amp; 17:00</div>
+    <div class="stat-sub">SAST daily</div>
+  </div>
+</div>
+
+<!-- ── Recent pipeline runs ─────────────────────────────────── -->
+<div class="card">
+  <div class="header-row">
+    <h2 style="margin-bottom:0">Pipeline Runs</h2>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+  </div>
+  <ul class="run-list" id="run-list">
+    <li class="empty">Loading…</li>
+  </ul>
+</div>
+
+<!-- ── Source breakdown ──────────────────────────────────────── -->
+<div class="card">
+  <h2>Listings by Source</h2>
+  <div class="source-list" id="source-list">
+    <span class="muted">Loading…</span>
+  </div>
+</div>
+
+<!-- ── Recent scrape runs from Supabase ─────────────────────── -->
+<div class="card">
+  <h2>Recent Scrape Runs (Supabase)</h2>
+  <div style="overflow-x:auto">
+    <table id="scrape-table">
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th>Status</th>
+          <th>Started</th>
+          <th>Found</th>
+          <th>New</th>
+          <th>Errors</th>
+        </tr>
+      </thead>
+      <tbody id="scrape-body">
+        <tr><td colspan="6" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+async function loadJSON(path) {
+  try {
+    const r = await fetch(path + '?_=' + Date.now());
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('en-ZA', { timeZone: 'Africa/Johannesburg',
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit' });
+}
+
+function fmtDur(s) {
+  if (s == null) return '—';
+  const m = Math.floor(s / 60);
+  const sec = Math.round(s % 60);
+  return m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function num(n) {
+  if (n == null) return '—';
+  return Number(n).toLocaleString();
+}
+
+// ---------------------------------------------------------------------------
+// Render: stat cards
+// ---------------------------------------------------------------------------
+
+function renderStats(history, live) {
+  const total   = live?.total_listings ?? '—';
+  const scored  = live?.scored ?? '—';
+  document.getElementById('stat-total').textContent  = num(total);
+  document.getElementById('stat-scored').textContent = num(scored);
+
+  const last = history?.[0];
+  if (last) {
+    document.getElementById('stat-last-run').textContent =
+      fmtTime(last.started_at);
+    const el = document.getElementById('stat-last-status');
+    el.textContent  = last.overall_status.toUpperCase();
+    el.style.color  = last.overall_status === 'success' ? 'var(--green)' : 'var(--red)';
+  }
+
+  document.getElementById('last-refresh').textContent =
+    'Refreshed ' + new Date().toLocaleTimeString('en-ZA', {timeZone:'Africa/Johannesburg'}) + ' SAST';
+}
+
+// ---------------------------------------------------------------------------
+// Render: pipeline run list
+// ---------------------------------------------------------------------------
+
+function stepDotClass(status) {
+  if (status === 'success') return 'dot-success';
+  if (status === 'failed')  return 'dot-failed';
+  return 'dot-skipped';
+}
+
+function renderRuns(history) {
+  const ul = document.getElementById('run-list');
+  if (!history || history.length === 0) {
+    ul.innerHTML = '<li class="empty">No runs recorded yet. Run the pipeline to see results.</li>';
+    return;
+  }
+
+  ul.innerHTML = history.map((run, i) => {
+    const statusBadge = `<span class="badge badge-${run.overall_status}">${run.overall_status}</span>`;
+    const trigBadge   = `<span class="badge badge-${run.trigger}">${run.trigger}</span>`;
+
+    const steps = (run.steps || []).map(s => `
+      <div class="step-pill">
+        <div class="dot ${stepDotClass(s.status)}"></div>
+        <span class="step-name">${s.step || s.script}</span>
+        <span class="step-dur">${fmtDur(s.duration)}</span>
+      </div>
+    `).join('');
+
+    return `
+      <li class="run-item" style="display:block;padding:12px 0;border-bottom:1px solid var(--border)">
+        <details>
+          <summary style="display:grid;grid-template-columns:110px 90px 80px 90px 1fr;gap:12px;align-items:center">
+            <span class="muted" style="font-size:11px">${fmtTime(run.started_at)}</span>
+            ${statusBadge}
+            ${trigBadge}
+            <span class="muted">${fmtDur(run.total_duration)}</span>
+            <span><span class="arrow">▶</span><span class="muted" style="font-size:11px">steps (${(run.steps||[]).length})</span></span>
+          </summary>
+          <div class="steps-grid" style="margin-top:10px">${steps}</div>
+        </details>
+      </li>
+    `;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Render: source chips
+// ---------------------------------------------------------------------------
+
+function renderSources(live) {
+  const el = document.getElementById('source-list');
+  const counts = live?.source_counts;
+  if (!counts || Object.keys(counts).length === 0) {
+    el.innerHTML = '<span class="muted">No data — run the pipeline first.</span>';
+    return;
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  el.innerHTML = sorted.map(([src, n]) =>
+    `<div class="source-chip">${src} <span>${num(n)}</span></div>`
+  ).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Render: recent scrape runs table
+// ---------------------------------------------------------------------------
+
+function renderScrapeRuns(live) {
+  const tbody = document.getElementById('scrape-body');
+  const runs  = live?.recent_runs;
+  if (!runs || runs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No data.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = runs.map(r => {
+    const ok = r.status === 'completed';
+    const statusColor = ok ? 'var(--green)' : (r.status === 'running' ? 'var(--yellow)' : 'var(--red)');
+    return `
+      <tr>
+        <td>${r.source || '—'}</td>
+        <td style="color:${statusColor}">${r.status || '—'}</td>
+        <td class="muted">${fmtTime(r.started_at)}</td>
+        <td>${num(r.listings_found)}</td>
+        <td class="green">${num(r.listings_new)}</td>
+        <td class="${(r.errors||0)>0?'red':'muted'}">${num(r.errors)}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Load all and render
+// ---------------------------------------------------------------------------
+
+async function loadAll() {
+  const [history, live] = await Promise.all([
+    loadJSON('run_history.json'),
+    loadJSON('live_stats.json'),
+  ]);
+
+  renderStats(history, live);
+  renderRuns(history);
+  renderSources(live);
+  renderScrapeRuns(live);
+}
+
+// Auto-refresh every 60 seconds
+loadAll();
+setInterval(loadAll, 60_000);
+</script>
+</body>
+</html>

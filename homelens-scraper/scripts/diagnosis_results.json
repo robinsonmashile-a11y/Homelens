@@ -1,0 +1,448 @@
+[
+  {
+    "source": "pamgolding",
+    "url": "https://www.pamgolding.co.za/property-search/properties-to-rent-cape-town/3080",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "From R300,000 per month",
+        "price": 300000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "From R185,000 per month",
+        "price": 185000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "From R185,000 per month",
+        "price": 185000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "From R165,000 per month",
+        "price": 165000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "From R145,000 per month",
+        "price": 145000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:49:46.492401+00:00"
+  },
+  {
+    "source": "sothebys",
+    "url": "https://www.sothebysrealty.co.za/results/residential/to-let/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R30,000 pm",
+        "price": 30000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R40,000 pm",
+        "price": 40000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R43,950 pm",
+        "price": 43950,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R30,000 pm",
+        "price": 30000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R11,000 pm",
+        "price": 11000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:50:14.398358+00:00"
+  },
+  {
+    "source": "tyson",
+    "url": "https://www.tysonprop.co.za/results/residential/to-let/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R280,000 pm",
+        "price": 280000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "POA",
+        "price": null,
+        "status": "poa"
+      },
+      {
+        "found": true,
+        "text": "POA",
+        "price": null,
+        "status": "poa"
+      },
+      {
+        "found": true,
+        "text": "R230,000 pm",
+        "price": 230000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R230,000 pm",
+        "price": 230000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:50:37.266768+00:00"
+  },
+  {
+    "source": "rawson",
+    "url": "https://rawson.co.za/property/to-rent/cape-town",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R12,500 p/m",
+        "price": 12500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R16,500 p/m",
+        "price": 16500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R16,500 p/m",
+        "price": 16500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R17,000 p/m",
+        "price": 17000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R8,900 p/m",
+        "price": 8900,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:50:47.585454+00:00"
+  },
+  {
+    "source": "seeff",
+    "url": "https://www.seeff.com/results/residential/to-rent/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R17,500 pm",
+        "price": 17500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R5,700,000",
+        "price": 5700000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R11,000 pm",
+        "price": 11000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R10,500 pm",
+        "price": 10500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R24,000 pm",
+        "price": 24000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:51:21.171344+00:00"
+  },
+  {
+    "source": "remax",
+    "url": "https://www.remax.co.za/property-to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": null,
+    "run_at": "2026-07-07T13:51:33.695220+00:00"
+  },
+  {
+    "source": "quay1",
+    "url": "https://www.quay1.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": "Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://www.quay1.co.za/results/residential/to-rent/cape-town/\", waiting until \"networkidle\"\n",
+    "run_at": "2026-07-07T13:52:33.752450+00:00"
+  },
+  {
+    "source": "chaseveritt",
+    "url": "https://www.chaseveritt.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": "Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://www.chaseveritt.co.za/results/residential/to-rent/cape-town/\", waiting until \"networkidle\"\n",
+    "run_at": "2026-07-07T13:53:33.813069+00:00"
+  },
+  {
+    "source": "greeff",
+    "url": "https://www.greeff.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R6,795,000",
+        "price": 6795000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R32,000 pm",
+        "price": 32000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R5,495,000",
+        "price": 5495000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R1,750,000",
+        "price": 1750000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R13,500 pm",
+        "price": 13500,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:54:17.100713+00:00"
+  },
+  {
+    "source": "jawitz",
+    "url": "https://www.jawitz.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R870,000",
+        "price": 870000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R5,499,000",
+        "price": 5499000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R125,000,000",
+        "price": 125000000,
+        "status": "ok"
+      },
+      {
+        "found": false,
+        "text": "",
+        "price": null,
+        "status": "unknown"
+      },
+      {
+        "found": true,
+        "text": "R12,500 pm",
+        "price": 12500,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:54:30.815393+00:00"
+  },
+  {
+    "source": "engelvolkers",
+    "url": "https://www.engelvoelkers.com/za/en/properties/res/rent/real-estate/western-cape/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "ZAR 15,000",
+        "price": 15000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "ZAR 17,000",
+        "price": 17000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "ZAR 28,000",
+        "price": 28000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "ZAR 2,800",
+        "price": 2800,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "ZAR 24,500",
+        "price": 24500,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:54:43.668826+00:00"
+  },
+  {
+    "source": "century21",
+    "url": "https://www.century21.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R35,000,000",
+        "price": 35000000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R22,995,000",
+        "price": 22995000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R27,995,000",
+        "price": 27995000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R1,199,990",
+        "price": 1199990,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R3,200,000",
+        "price": 3200000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:55:08.353173+00:00"
+  },
+  {
+    "source": "harcourts",
+    "url": "https://harcourts.net/ZA/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": null,
+    "run_at": "2026-07-07T13:55:25.556501+00:00"
+  },
+  {
+    "source": "lionlead",
+    "url": "https://www.lionlead.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": "Page.goto: net::ERR_CONNECTION_REFUSED at https://www.lionlead.co.za/results/residential/to-rent/cape-town/\nCall log:\n  - navigating to \"https://www.lionlead.co.za/results/residential/to-rent/cape-town/\", waiting until \"networkidle\"\n",
+    "run_at": "2026-07-07T13:55:25.669375+00:00"
+  },
+  {
+    "source": "abc_international",
+    "url": "https://www.abcinternational.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": null,
+    "run_at": "2026-07-07T13:55:50.330053+00:00"
+  },
+  {
+    "source": "justproperty",
+    "url": "https://www.justproperty.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "D_timing",
+    "samples": [],
+    "error": null,
+    "run_at": "2026-07-07T13:56:09.223415+00:00"
+  },
+  {
+    "source": "dgproperties",
+    "url": "https://www.dgproperties.co.za/results/residential/to-rent/cape-town/",
+    "bucket": "ok",
+    "samples": [
+      {
+        "found": true,
+        "text": "R10,500,000",
+        "price": 10500000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R38,500 pm",
+        "price": 38500,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R23,500,000",
+        "price": 23500000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R90,000 pm",
+        "price": 90000,
+        "status": "ok"
+      },
+      {
+        "found": true,
+        "text": "R25,000 pm",
+        "price": 25000,
+        "status": "ok"
+      }
+    ],
+    "error": null,
+    "run_at": "2026-07-07T13:56:22.514254+00:00"
+  }
+]
