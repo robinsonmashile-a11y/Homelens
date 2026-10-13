@@ -82,19 +82,35 @@ def _check_env() -> None:
 
 def _check_schema() -> None:
     """Abort before scraping if listing_status / levy columns are missing —
-    every insert would otherwise fail on the unknown columns."""
+    every insert would otherwise fail on the unknown columns.
+
+    Network errors (e.g. dropped HTTP/2 streams on CI runners) are retried and
+    never reported as a schema problem."""
+    from postgrest.exceptions import APIError
     from scraper.database import get_client
-    try:
-        get_client().table('listings').select(
-            'listing_status,status_changed_at,levy_monthly,rates_monthly,'
-            'levies_rates_combined_monthly,costs_source,status_source,'
-            'costs_raw_snippet,costs_checked_at,city'
-        ).limit(1).execute()
-    except Exception as e:
-        logger.error('listings table is missing the status/costs/city columns (%s). '
-                     'Run supabase/migrations/listing_status_and_costs.sql and add_city_column.sql in the '
-                     'Supabase SQL editor, then re-run.', e)
-        sys.exit(1)
+
+    last_err: Exception | None = None
+    for attempt in range(1, 5):
+        try:
+            get_client().table('listings').select(
+                'listing_status,status_changed_at,levy_monthly,rates_monthly,'
+                'levies_rates_combined_monthly,costs_source,status_source,'
+                'costs_raw_snippet,costs_checked_at,city'
+            ).limit(1).execute()
+            return
+        except APIError as e:
+            logger.error('listings table is missing the status/costs/city columns (%s). '
+                         'Run supabase/migrations/listing_status_and_costs.sql and add_city_column.sql in the '
+                         'Supabase SQL editor, then re-run.', e)
+            sys.exit(1)
+        except Exception as e:
+            last_err = e
+            logger.warning('Schema check attempt %d/4 failed (%s: %s) — retrying',
+                           attempt, type(e).__name__, e)
+            time.sleep(2 * attempt)
+
+    logger.error('Could not reach Supabase after 4 attempts: %s', last_err)
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
