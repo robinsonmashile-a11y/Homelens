@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from supabase import create_client, Client
 
@@ -31,11 +31,15 @@ def validate_listing(listing: dict) -> dict:
     Rules:
       - If size_m2 exceeds the type-specific cap, null it out along with
         price_per_m2.  This catches ERF/plot sizes being stored as floor sizes.
+      - city defaults to 'cape-town' when the scraper did not set one.
       - image_url must be a valid http/https URL without placeholder keywords.
         Empty strings are converted to None.
 
     Modifies in-place and returns the same dict.
     """
+    # Scrapers that only cover Cape Town (duarte, gumtree) don't set a city.
+    listing.setdefault('city', 'cape-town')
+
     ptype  = (listing.get('property_type') or '').lower()
     size   = listing.get('size_m2')
     cap    = _SIZE_CAPS.get(ptype)
@@ -67,6 +71,69 @@ def get_client() -> Client:
     )
 
 
+# ── Listing status + monthly costs ────────────────────────────────────────────
+
+_COST_FIELDS = ('levy_monthly', 'rates_monthly', 'levies_rates_combined_monthly')
+
+
+def _merge_status_and_costs(listing: dict, old: dict, update_data: dict, now: str) -> None:
+    """
+    Write rules for listing_status and the levy/rates fields on an existing row.
+
+    Status: written on every run. When it differs from the stored value the
+    change is recorded in status_changed_at (live -> under_offer/sold, and any
+    other transition, e.g. under_offer -> live when a deal falls through).
+
+    Costs: a figure is only ever written when this run found a real number.
+    A run that finds nothing leaves the stored levy/rates untouched — a real
+    number is never overwritten with null.
+    """
+    new_status = listing.get('listing_status')
+    if new_status:
+        update_data['listing_status'] = new_status
+        if listing.get('status_source'):
+            update_data['status_source'] = listing['status_source']
+        if new_status != (old.get('listing_status') or 'live'):
+            update_data['status_changed_at'] = now
+
+    found_any = False
+    for field in _COST_FIELDS:
+        value = listing.get(field)
+        if value is not None:
+            update_data[field] = value
+            found_any = True
+    if found_any:
+        update_data['costs_source'] = listing.get('costs_source')
+        update_data['costs_raw_snippet'] = listing.get('costs_raw_snippet')
+    if listing.get('costs_checked_at'):
+        update_data['costs_checked_at'] = listing['costs_checked_at']
+
+
+def get_costs_checked_ids(source: str, max_age_days: int = 30) -> set[str]:
+    """
+    listing_ids of `source` whose levy/rates were checked within max_age_days.
+    The scrapers skip the per-listing page visit for these. Paginated because
+    Supabase caps a single response at 1000 rows.
+    """
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    ids: set[str] = set()
+    offset, page_size = 0, 1000
+    while True:
+        rows = (
+            client.table('listings')
+            .select('listing_id')
+            .eq('source', source)
+            .gte('costs_checked_at', cutoff)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        ).data or []
+        ids.update(r['listing_id'] for r in rows)
+        if len(rows) < page_size:
+            return ids
+        offset += page_size
+
+
 def upsert_listing(listing: dict) -> str:
     """
     Insert new listing or update existing one.
@@ -77,7 +144,7 @@ def upsert_listing(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen')
+        .select('listing_id, price, price_history, first_seen, listing_status')
         .eq('listing_id', listing['listing_id'])
         .execute()
     )
@@ -92,6 +159,8 @@ def upsert_listing(listing: dict) -> str:
         listing['created_at'] = now
         listing['updated_at'] = now
         listing['last_scraped_at'] = now
+        if listing.get('listing_status') not in (None, 'live'):
+            listing['status_changed_at'] = now
         client.table('listings').insert(listing).execute()
         return 'new'
 
@@ -106,6 +175,8 @@ def upsert_listing(listing: dict) -> str:
     # Always propagate image_url if the scraper found one
     if listing.get('image_url'):
         update_data['image_url'] = listing['image_url']
+
+    _merge_status_and_costs(listing, old, update_data, now)
 
     # Always propagate price_status when the scraper has a definitive answer.
     # 'unknown' means the selector found nothing (transient); don't overwrite a
@@ -156,7 +227,7 @@ def upsert_listing_by_url(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen')
+        .select('listing_id, price, price_history, first_seen, listing_status')
         .eq('listing_url', listing['listing_url'])
         .execute()
     )
@@ -171,6 +242,8 @@ def upsert_listing_by_url(listing: dict) -> str:
         listing['created_at'] = now
         listing['updated_at'] = now
         listing['last_scraped_at'] = now
+        if listing.get('listing_status') not in (None, 'live'):
+            listing['status_changed_at'] = now
         client.table('listings').insert(listing).execute()
         return 'new'
 
@@ -185,6 +258,8 @@ def upsert_listing_by_url(listing: dict) -> str:
     # Always propagate image_url if the scraper found one
     if listing.get('image_url'):
         update_data['image_url'] = listing['image_url']
+
+    _merge_status_and_costs(listing, old, update_data, now)
 
     new_status = listing.get('price_status')
     if new_status and new_status != 'unknown':

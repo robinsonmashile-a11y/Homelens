@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS listings (
     listing_id       TEXT PRIMARY KEY,         -- MD5 hash of the listing URL
     source           TEXT NOT NULL,            -- 'property24' | 'private_property' | 'gumtree' | 'facebook'
     listing_type     TEXT NOT NULL,            -- 'rent' | 'sale' | 'development'
+    city             TEXT NOT NULL DEFAULT 'cape-town'
+                     CHECK (city IN ('cape-town', 'johannesburg')),  -- suburb names repeat across cities
     suburb           TEXT NOT NULL,            -- normalised slug e.g. 'sea-point'
     price            INTEGER NOT NULL,         -- ZAR (monthly rent or asking price)
     bedrooms         SMALLINT,

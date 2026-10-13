@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS listings (
     listing_id TEXT PRIMARY KEY,
     source TEXT NOT NULL DEFAULT 'gumtree',
     listing_type TEXT NOT NULL CHECK (listing_type IN ('rent', 'sale')),
+    city TEXT NOT NULL DEFAULT 'cape-town' CHECK (city IN ('cape-town', 'johannesburg')),
     suburb TEXT,
     suburb_normalised TEXT,
     price INTEGER,
@@ -196,3 +197,65 @@ All contact information is replaced with `[contact removed]` in the stored descr
 - `is_active` — set to `false` for listings not seen in the most recent scrape run
 - `days_on_market` — computed from `first_seen` to the date of last price change
 - `raw_data` — full snapshot of the scraped + parsed listing at time of last update
+
+---
+
+## Listing status and monthly levies/rates
+
+Every scraper records two extra things per listing:
+
+| Field(s) | Meaning |
+|---|---|
+| `listing_status`, `status_source`, `status_changed_at` | `live` / `under_offer` / `sold`, read from the badge on the search-result card on **every** run |
+| `levy_monthly`, `rates_monthly`, `levies_rates_combined_monthly`, `costs_source`, `costs_raw_snippet`, `costs_checked_at` | from the listing's own page, **sale listings only** |
+
+`costs_source` is `site` (the site's own markup), `fallback` (text search of the page)
+or `description`. A combined "levies & rates" figure is stored as-is, never split.
+Levy is kept to R150–R25,000/mo and rates to R50–R20,000/mo; anything outside is dropped.
+
+**Setup:** run `supabase/migrations/listing_status_and_costs.sql` before the next scrape
+(`run_all_scrapers.py` refuses to start without it).
+
+**Where things live**
+- `scraper/extractors.py` — the shared text fallbacks (`extract_status_from_text`, `extract_costs_from_text`)
+- `scraper/enrich.py` — connects each scraper's `SELECTORS` block to the fallbacks; visits listing pages
+- `SELECTORS` at the top of each `scraper/<site>.py` — the only thing to edit when a site changes its markup
+- `scraper/database.py` — write rules: a stored levy/rates is never overwritten with null; a status change sets `status_changed_at`
+
+**Page visits:** 16 scrapers only read result cards, so `CostEnricher` opens the listing page of
+each *sale* listing that is new or not checked in the last 30 days. Set `RECHECK_COSTS=1` to force a
+re-check of everything (do this after fixing a site's selectors).
+
+**Report:** `python scripts/run_report.py` (also printed at the end of `run_all_scrapers.py`) shows per site
+the % of sale listings with levy / rates, the site vs fallback split, and status counts. It flags
+`SELECTORS BROKEN` when costs are mostly `fallback`.
+
+**Tests** run the real scrapers against real saved pages in `tests/fixtures/`:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+python scripts/capture_fixtures.py remax        # re-capture one site's pages (needs network)
+```
+
+---
+
+## Cities (Cape Town + Johannesburg)
+
+Every listing carries a `city` (`cape-town` | `johannesburg`). The list of cities is `scraper/cities.py`;
+each scraper's public `run_*_scraper()` loops over it and stamps `city` on what it yields.
+
+**Setup:** run `supabase/migrations/add_city_column.sql` (existing rows become `cape-town`).
+
+| Scraper | Johannesburg |
+|---|---|
+| jawitz, seeff, tyson, quay1, chaseveritt, century21, greeff, harcourts, sothebys, justproperty, dgproperties, lionlead | `/johannesburg/` in place of `/cape-town/` (jawitz verified live) |
+| abc_international, remax, engelvolkers | `gauteng/johannesburg` (they already put the province in the URL) |
+| rawson | `/johannesburg` |
+| pamgolding | **Johannesburg North only** (area 624) — add more area IDs to `CITY_SEARCH_URLS` |
+| exprealty | Johannesburg metro bounding box, metro towns only (Sandton, Randburg, Roodepoort, Midrand, Soweto) |
+| duarte, gumtree | **Cape Town only** (Duarte has no Johannesburg stock; Gumtree has no Johannesburg-level location code) |
+
+Notes: the tyson/seeff/quay1 `advanced_search` UUIDs are Cape Town filters and are not sent for Johannesburg.
+RE/MAX's per-suburb pass is Cape Town only. The analytics engine (`scraper/engine.py`) is currently limited to
+`city = 'cape-town'` because suburb names repeat across cities (Claremont, Rosebank, ...); per-city baselines are a follow-up.

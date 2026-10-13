@@ -31,6 +31,7 @@ Agencies (19):
 Legend (per-listing output):
     [+] new   [~] updated   [=] unchanged
     [S] sale  [R] rent
+    [CPT] Cape Town  [JNB] Johannesburg
     price marker: R=captured  P=POA  !=extraction failed  ?=unknown
 """
 from __future__ import annotations
@@ -76,6 +77,23 @@ def _check_env() -> None:
     missing  = [k for k in required if not os.environ.get(k)]
     if missing:
         logger.error('Missing environment variables: %s', ', '.join(missing))
+        sys.exit(1)
+
+
+def _check_schema() -> None:
+    """Abort before scraping if listing_status / levy columns are missing —
+    every insert would otherwise fail on the unknown columns."""
+    from scraper.database import get_client
+    try:
+        get_client().table('listings').select(
+            'listing_status,status_changed_at,levy_monthly,rates_monthly,'
+            'levies_rates_combined_monthly,costs_source,status_source,'
+            'costs_raw_snippet,costs_checked_at,city'
+        ).limit(1).execute()
+    except Exception as e:
+        logger.error('listings table is missing the status/costs/city columns (%s). '
+                     'Run supabase/migrations/listing_status_and_costs.sql and add_city_column.sql in the '
+                     'Supabase SQL editor, then re-run.', e)
         sys.exit(1)
 
 
@@ -145,6 +163,7 @@ async def run_scraper(
             price     = listing.get('price') or 0
             beds      = listing.get('bedrooms') or '?'
             suburb    = (listing.get('suburb_normalised') or '').replace('-', ' ').title()
+            city_tag  = {'cape-town': 'CPT', 'johannesburg': 'JNB'}.get(listing.get('city') or 'cape-town', '???')
             ltype     = listing.get('listing_type') or 'sale'
             ltype     = ltype if ltype in ('sale', 'rent') else 'sale'
             pstatus   = listing.get('price_status') or 'unknown'
@@ -189,7 +208,7 @@ async def run_scraper(
                 title     = (listing.get('title') or 'Listing')[:35]
                 price_str = f'R{price:,}' if price else pstatus
                 print(
-                    f'  [{source}] [{flag}][{type_key}][{pmarker}]'
+                    f'  [{source}] [{flag}][{type_key}][{pmarker}][{city_tag}]'
                     f'  {suburb:<18} {str(beds):<4}bed  {price_str:<14}'
                     f'  img:{img_tag}  {title}'
                 )
@@ -276,8 +295,19 @@ async def run_scraper(
 # Main
 # ---------------------------------------------------------------------------
 
+def _parse_only(argv: list[str]) -> list[str]:
+    """--only rawson,seeff  (or --only=rawson). Empty list = run all."""
+    for i, arg in enumerate(argv):
+        if arg == '--only' and i + 1 < len(argv):
+            return [x.strip() for x in argv[i + 1].split(',') if x.strip()]
+        if arg.startswith('--only='):
+            return [x.strip() for x in arg.split('=', 1)[1].split(',') if x.strip()]
+    return []
+
+
 async def main() -> None:
     _check_env()
+    _check_schema()
 
     from scraper.pamgolding        import run_pamgolding_scraper
     from scraper.sothebys          import run_sothebys_scraper
@@ -321,13 +351,22 @@ async def main() -> None:
         ('exprealty',         run_exprealty_scraper),
     ]
 
+    only = _parse_only(sys.argv[1:])
+    if only:
+        known = {name for name, _ in scrapers}
+        unknown = [o for o in only if o not in known]
+        if unknown:
+            logger.error('Unknown scraper(s): %s. Known: %s', ', '.join(unknown), ', '.join(sorted(known)))
+            sys.exit(2)
+        scrapers = [(name, fn) for name, fn in scrapers if name in only]
+
     run_id         = str(uuid.uuid4())
     run_started_at = datetime.now(timezone.utc).isoformat()
     n              = len(scrapers)
 
     print()
     print('═' * 72)
-    print('  HOMELENS — FULL RESCRAPE  (19 agencies)')
+    print(f'  HOMELENS — RESCRAPE  ({n} agenc{"y" if n == 1 else "ies"})')
     print(f'  Started : {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}')
     print(f'  Run ID  : {run_id}')
     print('═' * 72)
@@ -419,6 +458,13 @@ async def main() -> None:
         print(f'  ⚠  FAILED scrapers : {", ".join(failed_sources)}')
         print()
 
+    # ── Listing status + levies/rates coverage ────────────────────────────
+    try:
+        from run_report import print_run_report
+        print_run_report(run_started_at)
+    except Exception as e:
+        logger.warning('Could not build status/costs report: %s', e)
+
     print(f'  Run ID : {run_id}')
     print('  (Audit rows written to scrape_audit_log)')
     print()
@@ -429,6 +475,9 @@ async def main() -> None:
     print()
     print('═' * 72)
     print()
+
+    if failed_sources:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

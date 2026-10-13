@@ -44,6 +44,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from scraper.utils import (
@@ -52,8 +53,34 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES
+from scraper.enrich import costs_from_texts, resolve_status
+from scraper.extractors import cost_in_bounds, parse_money
 
 logger = logging.getLogger('homelens.exprealty')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# eXp is read from its JSON API, so "selectors" are API field names. Checked
+# against tests/fixtures/exprealty_api.json and a survey of all 763 Cape Town
+# records (re-capture: scripts/capture_fixtures.py exprealty).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # `status` is "1" on every record the site currently returns. The scraper's
+    # own filter also admits 8, 9, 10, 11 but none occur in the data, so their
+    # meaning is unknown — unmapped codes fall through to the text fallback
+    # rather than being guessed at.
+    'status_field': 'status',
+    'status_codes': {'1': 'live'},
+    'status_map':   {},
+    # `levy` and `rates` exist on every record but are null on all 763 today
+    # (`additional_costs_monthly` too — not used, it is not levy/rates). They are
+    # read first in case agents start filling them in; otherwise the levy/rates
+    # typed into the description is picked up by the text fallback.
+    'levy_field':   'levy',
+    'rates_field':  'rates',
+    'cost_rows':    None,
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -86,6 +113,16 @@ _GEO_LAT_MIN = '-34.69713791925447'
 _GEO_LAT_MAX = '-33.12904050654684'
 _GEO_LON_MIN = '18.150688306249997'
 _GEO_LON_MAX = '19.161430493749997'
+
+# City of Johannesburg metro bounding box (Midrand in the north to Orange Farm
+# in the south, Randburg/Roodepoort in the west to the Ekurhuleni border in the
+# east). Approximate — eXp's own Johannesburg search box has not been captured.
+# Pretoria (lat > -25.8) is deliberately outside it.
+CITY_GEO_BOUNDS: dict[str, tuple[str, str, str, str]] = {
+    #                 lat_min               lat_max               lon_min              lon_max
+    'cape-town':    (_GEO_LAT_MIN,         _GEO_LAT_MAX,         _GEO_LON_MIN,        _GEO_LON_MAX),
+    'johannesburg': ('-26.45',             '-25.85',             '27.70',             '28.35'),
+}
 
 PAGE_SIZE   = 24
 MAX_RECORDS = {
@@ -161,7 +198,7 @@ def _api_headers() -> dict:
     }
 
 
-def _fetch_page(offset: int, sale: bool) -> tuple[list[dict], int]:
+def _fetch_page(offset: int, sale: bool, city_slug: str = 'cape-town') -> tuple[list[dict], int]:
     """
     Fetch one page of listings from Supabase.
     Returns (records, total_count).
@@ -173,9 +210,10 @@ def _fetch_page(offset: int, sale: bool) -> tuple[list[dict], int]:
 
     # Geo bounds params are passed as raw query string (not URL-encoded through
     # urlencode) because PostgREST expects repeated param names for gte/lte.
+    lat_min, lat_max, lon_min, lon_max = CITY_GEO_BOUNDS[city_slug]
     geo = (
-        f'geo_lat=gte.{_GEO_LAT_MIN}&geo_lat=lte.{_GEO_LAT_MAX}'
-        f'&geo_lon=gte.{_GEO_LON_MIN}&geo_lon=lte.{_GEO_LON_MAX}'
+        f'geo_lat=gte.{lat_min}&geo_lat=lte.{lat_max}'
+        f'&geo_lon=gte.{lon_min}&geo_lon=lte.{lon_max}'
     )
     params = {
         'select':       '*',
@@ -201,6 +239,23 @@ def _fetch_page(offset: int, sale: bool) -> tuple[list[dict], int]:
         return data, total
 
 
+# eXp's `city` field is "Suburb, Town". Towns inside the City of Johannesburg
+# metro; the bounding box also catches Tshwane (Centurion) and Ekurhuleni /
+# West Rand towns (Germiston, Boksburg, Kempton Park, Edenvale, Krugersdorp, ...)
+# which are other metros and are dropped.
+_JHB_METRO_TOWNS: frozenset[str] = frozenset({
+    'johannesburg', 'sandton', 'randburg', 'roodepoort', 'midrand', 'soweto',
+})
+
+
+def _suburb_from_city_field(city_field: str) -> str | None:
+    """'Fourways Gardens, Sandton' -> 'fourways-gardens' (metro towns only)."""
+    parts = [p.strip() for p in (city_field or '').split(',') if p.strip()]
+    if len(parts) < 2 or parts[-1].lower() not in _JHB_METRO_TOWNS:
+        return None
+    return normalise_suburb(parts[0])
+
+
 def _suburb_from_address(address: str) -> str | None:
     """
     Extract suburb from a full address string.
@@ -215,7 +270,7 @@ def _suburb_from_address(address: str) -> str | None:
         return None
 
     skip_lower = {
-        'cape town', 'western cape', 'south africa',
+        'cape town', 'western cape', 'south africa', 'johannesburg',
         'gauteng', 'kwazulu-natal', 'eastern cape', 'northern cape',
     }
     parts = [p.strip() for p in address.split(',')]
@@ -343,7 +398,7 @@ def _image_from_record(record: dict) -> str | None:
     return None
 
 
-def _map_record(record: dict, listing_type: str) -> dict | None:
+def _map_record(record: dict, listing_type: str, city_slug: str = 'cape-town') -> dict | None:
     """Map a Supabase record to the Homelens listing schema."""
     uid = record.get('id', '')
     if not uid:
@@ -362,17 +417,27 @@ def _map_record(record: dict, listing_type: str) -> dict | None:
     description = (record.get('description') or '').strip()
     address     = record.get('address') or ''
 
-    suburb = _suburb_from_address(address)
-    if not suburb:
-        suburb = _suburb_from_title(title)
+    if city_slug == 'cape-town':
+        suburb = _suburb_from_address(address)
+        if not suburb:
+            # Title fallback only knows Cape Town suburbs
+            suburb = _suburb_from_title(title)
+    else:
+        # The address is mostly empty and, when set, ends in the broad area
+        # ("Sandton"), so use the "Suburb, Town" city field instead.
+        suburb = _suburb_from_city_field(record.get('city') or '')
 
     price_per_m2 = compute_price_per_m2(price, size_m2)
+
+    listing_status, status_source = _read_status(record, title, description)
+    costs = _read_costs(record, description) if listing_type == 'sale' else {}
 
     # ── Cape Town suburb whitelist — discard non-CT and no-suburb listings ──
     if not suburb:
         logger.debug('Skipping listing %s — no suburb found (address=%r)', listing_id, address)
         return None
-    if suburb not in _CT_SUBURBS:
+    # The geo bounding box already scopes other cities; the whitelist is Cape Town only.
+    if city_slug == 'cape-town' and suburb not in _CT_SUBURBS:
         logger.debug('Skipping non-CT suburb: %s (listing %s)', suburb, listing_id)
         return None
 
@@ -392,14 +457,59 @@ def _map_record(record: dict, listing_type: str) -> dict | None:
         'price_per_m2':      price_per_m2,
         'image_url':         image,
         'is_active':         True,
+        'listing_status':    listing_status,
+        'status_source':     status_source,
+        **costs,
     }
+
+
+def _read_status(record: dict, title: str, description: str) -> tuple[str, str]:
+    """API status code first; unknown codes fall back to the text of the listing."""
+    code = str(record.get(SELECTORS['status_field']))
+    mapped = SELECTORS['status_codes'].get(code)
+    if mapped:
+        return mapped, 'site'
+    if code not in ('None', ''):
+        logger.debug('Unmapped eXp status code %r on %s', code, record.get('id'))
+    return resolve_status([], f'{title}\n{description}', SELECTORS)
+
+
+def _api_amount(value, kind: str) -> float | None:
+    if value in (None, ''):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        amount = parse_money(str(value))
+    return cost_in_bounds(kind, amount)
+
+
+def _read_costs(record: dict, description: str) -> dict:
+    """Sale listings only. API levy/rates first, then the full description text."""
+    levy  = _api_amount(record.get(SELECTORS['levy_field']), 'levy')
+    rates = _api_amount(record.get(SELECTORS['rates_field']), 'rates')
+    if levy is not None or rates is not None:
+        costs = {
+            'levy_monthly': levy,
+            'rates_monthly': rates,
+            'levies_rates_combined_monthly': None,
+            'costs_source': 'site',
+            'costs_raw_snippet': f'api levy={record.get(SELECTORS["levy_field"])} '
+                                 f'rates={record.get(SELECTORS["rates_field"])}',
+        }
+    else:
+        # Full description — the 1000-char cut stored on the listing would drop
+        # levies typed at the end.
+        costs = costs_from_texts(None, description)
+    costs['costs_checked_at'] = datetime.now(timezone.utc).isoformat()
+    return costs
 
 
 # ---------------------------------------------------------------------------
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_exprealty_scraper() -> AsyncGenerator[dict, None]:
+async def _run_exprealty_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one listing dict at a time.
 
@@ -418,7 +528,7 @@ async def run_exprealty_scraper() -> AsyncGenerator[dict, None]:
         while offset < max_records:
             page += 1
             try:
-                records, total = _fetch_page(offset, is_sale)
+                records, total = _fetch_page(offset, is_sale, city['slug'])
             except Exception as e:
                 logger.warning('[%s] Page %d (offset=%d) failed: %s — stopping', lt_name, page, offset, e)
                 break
@@ -436,7 +546,7 @@ async def run_exprealty_scraper() -> AsyncGenerator[dict, None]:
 
             new_this_page = 0
             for rec in records:
-                mapped = _map_record(rec, lt_name)
+                mapped = _map_record(rec, lt_name, city['slug'])
                 if not mapped:
                     continue
                 lid = mapped['listing_id']
@@ -455,3 +565,12 @@ async def run_exprealty_scraper() -> AsyncGenerator[dict, None]:
             offset += PAGE_SIZE
             if offset < max_records:
                 time.sleep(REQUEST_DELAY)
+
+
+async def run_exprealty_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ exprealty — %s ══', city['name'])
+        async for listing in _run_exprealty_city(city):
+            listing['city'] = city['slug']
+            yield listing

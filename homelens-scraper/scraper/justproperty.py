@@ -37,8 +37,32 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES, city_index, city_url
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.justproperty')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Search-result card: <div class="card-badges"><div class="card-badge">Under offer</div>…
+    # (other badges — "New", "Reduced" — are ignored).
+    'status_badge': '.card-badges .card-badge',
+    'status_map':   {},
+    # Listing page, one row per figure:
+    #   <div class="listing-details-info-detail">
+    #     <span class="info-detail-label">Monthly Levy</span>
+    #     <span class="info-detail-value">R7,233.50</span></div>
+    # A "Total" row sits alongside — it is skipped by label, never used.
+    'cost_rows':    '.listing-details-info-detail',
+    'cost_label':   '.info-detail-label',
+    'cost_value':   '.info-detail-value',
+    'description':  '.overview-content-intro',
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -83,9 +107,8 @@ def _page_url(base: str, page_num: int) -> str:
 def _extract_suburb_from_url(url: str) -> str | None:
     path  = urlparse(url).path.rstrip('/')
     parts = [p for p in path.split('/') if p]
-    try:
-        ct_idx = parts.index('cape-town')
-    except ValueError:
+    ct_idx = city_index(parts)
+    if ct_idx is None:
         return None
     if ct_idx + 1 < len(parts):
         suburb = parts[ct_idx + 1]
@@ -294,6 +317,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                              listing_id, price, size_m2, bedrooms)
                 continue
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -310,6 +335,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -323,7 +350,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
+async def _run_justproperty_city(city: dict) -> AsyncGenerator[dict, None]:
     """Async generator — yields one listing dict at a time."""
     seen_ids: set[str] = set()
 
@@ -332,10 +359,12 @@ async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('justproperty', browser, SELECTORS)
+        await enricher.start()
 
         lt_configs = [
-            ('sale', SALE_BASE),
-            ('rent', RENT_BASE),
+            ('sale', city_url(SALE_BASE, city)),
+            ('rent', city_url(RENT_BASE, city)),
         ]
 
         for lt_name, base_path in lt_configs:
@@ -376,6 +405,7 @@ async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
 
                 for card in new_cards:
                     seen_ids.add(card['listing_id'])
+                    await enricher.enrich(card)
                     yield card
 
                 if page_num < max_pages and new_cards:
@@ -383,4 +413,14 @@ async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
                     logger.debug('[%s] Waiting %.1fs before next page', lt_name, delay)
                     await asyncio.sleep(delay)
 
+        await enricher.close()
         await browser.close()
+
+
+async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ justproperty — %s ══', city['name'])
+        async for listing in _run_justproperty_city(city):
+            listing['city'] = city['slug']
+            yield listing

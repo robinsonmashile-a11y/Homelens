@@ -24,8 +24,31 @@ from playwright.async_api import (
 )
 
 from .utils import clean_personal_info, normalise_suburb
+from .enrich import apply_costs, read_costs_from_page, resolve_status
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Gumtree is a private-seller classifieds site: no status badge exists on
+    # cards or ad pages, and sold ads are simply removed. Status is only read
+    # from the shared fallback (a standalone "SOLD" / "UNDER OFFER" line in the
+    # ad text), so a seller who types it into the ad is still caught.
+    'status_badge': None,
+    'status_map':   {},
+    # The ad's structured attributes (data-brevo-attributes) have no levy or
+    # rates field, so levies/rates only ever appear in the seller's free text.
+    'text_only':    True,
+    'cost_rows':    None,
+    'cost_label':   None,
+    'cost_value':   None,
+    'description':  ('.description-website-container, [class*="vip-description"], '
+                     '[class*="description-text"], [itemprop="description"]'),
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -164,6 +187,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'listing_type':      listing_type,
                 'source':            'gumtree',
             }
+            card_dict['listing_status'], card_dict['status_source'] = resolve_status(
+                [], title, SELECTORS)
             card_dict.update(structured)
             cards.append(card_dict)
 
@@ -195,6 +220,12 @@ async def _extract_detail(page: Page, url: str) -> dict:
         if desc_el:
             raw_desc = (await desc_el.inner_text()).strip()
             detail['description'] = clean_personal_info(raw_desc)
+            # A seller may type SOLD / UNDER OFFER on its own line in the ad.
+            detail['listing_status'], detail['status_source'] = resolve_status(
+                [], raw_desc, SELECTORS)
+
+        # Levies / rates from the ad text (page text first, then description).
+        detail['costs'] = await read_costs_from_page(page, SELECTORS)
 
         # Date posted
         date_el = await page.query_selector(
@@ -283,7 +314,14 @@ async def scrape_listing_type(
                         break
 
                     detail = await _extract_detail(detail_page, card['listing_url'])
+                    costs = detail.pop('costs', None)
+                    # Don't let a "live/default" from a page with no status text
+                    # overwrite a card-level status that was found.
+                    if detail.get('listing_status') == 'live':
+                        detail.pop('listing_status'); detail.pop('status_source', None)
                     merged = {**card, **detail}
+                    if listing_type == 'sale' and costs:      # levies/rates: sale only
+                        apply_costs(merged, costs)
                     yield merged
                     break
 

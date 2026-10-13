@@ -502,6 +502,7 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
                 .select('listing_id,suburb_normalised,listing_type,'
                         'bedrooms,property_type,price,size_m2,price_per_m2')
                 .eq('is_active', True)
+                .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
                 .eq('is_luxury', False)
                 .eq('is_outlier', False)
                 .filter('suburb_normalised', 'not.is', 'null')
@@ -519,6 +520,7 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
                     .select('listing_id,suburb_normalised,listing_type,'
                             'bedrooms,property_type,price,size_m2,price_per_m2')
                     .eq('is_active', True)
+                    .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
                     .filter('suburb_normalised', 'not.is', 'null')
                     .filter('price', 'not.is', 'null')
                     .filter('bedrooms', 'not.is', 'null')
@@ -808,6 +810,7 @@ def compute_listing_signals(
                 .select('listing_id,suburb_normalised,listing_type,bedrooms,'
                         'property_type,price,size_m2,price_per_m2,title')
                 .eq('is_active', True)
+                .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
                 .eq('is_luxury', False)
                 .eq('is_outlier', False)
                 .filter('price', 'not.is', 'null')
@@ -821,6 +824,7 @@ def compute_listing_signals(
                     .select('listing_id,suburb_normalised,listing_type,bedrooms,'
                             'property_type,price,size_m2,price_per_m2,title')
                     .eq('is_active', True)
+                    .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
                     .filter('price', 'not.is', 'null')
                     .range(off, off + lim - 1)
                     .execute()

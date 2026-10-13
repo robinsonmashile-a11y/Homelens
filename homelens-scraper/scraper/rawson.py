@@ -35,8 +35,31 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES, city_index, city_url
+from scraper.enrich import apply_costs, read_card_status, read_costs_from_page
 
 logger = logging.getLogger('homelens.rawson')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Result card image overlay:
+    #   <div class="badges"><div class="badge badge--red">Sold</div>
+    #   <div class="badge badge--white">Sole Mandate</div> …
+    # ("New Listing", "Sole/Joint Mandate" are ignored.)
+    'status_badge': '.badges .badge',
+    'status_map':   {},
+    # Listing page, in the same features grid as Building Size / Garages — one
+    # text per item, label and amount together:
+    #   <div class="features__label">Rates R6,800 per month</div>
+    'cost_rows':    '.features__item .features__label',
+    'cost_label':   None,
+    'cost_value':   None,
+    'description':  '.content-block__synopsis--large',
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -96,7 +119,7 @@ def _extract_suburb_from_title(title: str) -> str | None:
       '2 Bedroom flat to rent in Sea Point'
     """
     m = re.search(
-        r'\bin\s+([A-Za-z][A-Za-z\s\-\'\.]+?)(?:,\s*Cape Town|\s*[-–]|\s*$)',
+        r'\bin\s+([A-Za-z][A-Za-z\s\-\'\.]+?)(?:,\s*(?:Cape Town|Johannesburg)|\s*[-–]|\s*$)',
         title,
         re.I,
     )
@@ -214,6 +237,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                         except (ValueError, TypeError):
                             pass
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             # ── Synopsis (card snippet — used as fallback only) ────────────────
             synopsis_el = await card.query_selector('.card__synopsis p')
             synopsis    = (await synopsis_el.inner_text()).strip() if synopsis_el else ''
@@ -235,6 +260,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'has_parking':       None,   # filled from detail page
                 'has_garden':        None,   # filled from detail page
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
                 '_synopsis':         synopsis,  # temp; for fallback if detail fails
             })
 
@@ -259,7 +286,11 @@ async def _fetch_page_cards(
     page    = await context.new_page()
     try:
         logger.info('  [%s] Scraping page %d → %s', lt_name, page_num, url)
-        await page.goto(url, wait_until='networkidle', timeout=60_000)
+        await page.goto(url, wait_until='domcontentloaded', timeout=45_000)
+        try:
+            await page.wait_for_selector('div.card', timeout=20_000)
+        except Exception:
+            pass
         await asyncio.sleep(PAGE_LOAD_WAIT)
         await _scroll_to_load_all(page)
 
@@ -305,7 +336,13 @@ async def _fetch_detail(browser: Browser, url: str) -> dict:
     context = await _new_context(browser)
     page    = await context.new_page()
     try:
-        await page.goto(url, wait_until='networkidle', timeout=60_000)
+        await page.goto(url, wait_until='domcontentloaded', timeout=45_000)
+        try:
+            await page.wait_for_selector(
+                '.features__item, .content-block__synopsis--large', timeout=15_000,
+            )
+        except Exception:
+            pass  # page may lack these; fall through with whatever rendered
         await asyncio.sleep(2.0)
 
         size_m2     = None
@@ -354,12 +391,16 @@ async def _fetch_detail(browser: Browser, url: str) -> dict:
         }''')
         image_url = validate_image_url(raw_image)
 
+        # ── Monthly levy / rates (site rows first, then text fallback) ──────
+        costs = await read_costs_from_page(page, SELECTORS)
+
         return {
             'size_m2':     size_m2,
             'description': description,
             'has_parking': has_parking,
             'has_garden':  has_garden,
             'image_url':   image_url,
+            'costs':       costs,
         }
 
     except Exception as e:
@@ -376,7 +417,7 @@ async def _fetch_detail(browser: Browser, url: str) -> dict:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
+async def _run_rawson_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one enriched listing dict at a time.
 
@@ -400,8 +441,8 @@ async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
         )
 
         lt_configs = [
-            ('sale', SALE_BASE_URL),
-            ('rent', RENT_BASE_URL),
+            ('sale', city_url(SALE_BASE_URL, city)),
+            ('rent', city_url(RENT_BASE_URL, city)),
         ]
 
         for lt_name, base_url in lt_configs:
@@ -481,6 +522,10 @@ async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
                     card['has_garden']  = detail['has_garden']
                     card['image_url']   = detail['image_url']
 
+                    # Levies/rates: sale listings only (not shown on rentals)
+                    if lt_name == 'sale' and detail.get('costs'):
+                        apply_costs(card, detail['costs'])
+
                     # Prefer full description from detail; fall back to synopsis
                     if detail['description']:
                         card['description'] = detail['description']
@@ -517,3 +562,12 @@ async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
         total_with_size,
         100 * total_with_size / total_yielded if total_yielded else 0,
     )
+
+
+async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ rawson — %s ══', city['name'])
+        async for listing in _run_rawson_city(city):
+            listing['city'] = city['slug']
+            yield listing

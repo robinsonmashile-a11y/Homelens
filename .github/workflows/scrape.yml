@@ -1,0 +1,76 @@
+name: Homelens scrape
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily 04:00 SAST
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated scrapers to run (blank = all)'
+        required: false
+        default: ''
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        scraper:
+          - pamgolding
+          - sothebys
+          - tyson
+          - rawson
+          - seeff
+          - remax
+          - quay1
+          - chaseveritt
+          - greeff
+          - jawitz
+          - engelvolkers
+          - century21
+          - harcourts
+          - lionlead
+          - abc_international
+          - justproperty
+          - dgproperties
+          - duarte
+          - exprealty
+    defaults:
+      run:
+        working-directory: homelens-scraper
+    steps:
+      - name: Skip if not selected
+        id: gate
+        working-directory: .
+        run: |
+          ONLY="${{ github.event.inputs.only }}"
+          if [ -z "$ONLY" ] || echo ",$ONLY," | grep -q ",${{ matrix.scraper }},"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: homelens-scraper/requirements.txt
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run ${{ matrix.scraper }}
+        if: steps.gate.outputs.run == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/run_all_scrapers.py --only ${{ matrix.scraper }}

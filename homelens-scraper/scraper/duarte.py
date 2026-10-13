@@ -43,8 +43,35 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.duarte')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Result card (Houzez theme): <span class="label-status label">For Sale</span>
+    # or "Sold". "For Sale"/"Residential"/"Featured" labels are ignored.
+    'status_badge': '.label-status',
+    'status_map':   {},
+    # No structured levy/rates rows on Duarte listing pages (3 saved pages
+    # checked: only a mortgage-repayment calculator). cost_rows is None on
+    # purpose — costs come from the text fallback over the page + description
+    # if an agent types them in; the run report does not flag this site.
+    'text_only':    True,   # costs are never in structured rows; see above
+    'cost_rows':    None,
+    'cost_label':   None,
+    'cost_value':   None,
+    'description':  '.property-description-content',
+    # The "Bond Calculator" block prints "Monthly HOA Fees R250 00" — a calculator
+    # default, identical on every listing (seen on 3 different properties), not
+    # the property's levy. Hidden before the text fallback runs.
+    'text_exclude': '.property-mortgage-calculator-wrap',
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -318,6 +345,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 )
                 continue
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -334,6 +363,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -356,6 +387,8 @@ async def run_duarte_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('duarte', browser, SELECTORS)
+        await enricher.start()
 
         lt_configs = [
             ('sale', SALE_BASE),
@@ -400,6 +433,7 @@ async def run_duarte_scraper() -> AsyncGenerator[dict, None]:
 
                 for card in new_cards:
                     seen_ids.add(card['listing_id'])
+                    await enricher.enrich(card)
                     yield card
 
                 if page_num < max_pages and new_cards:
@@ -407,4 +441,5 @@ async def run_duarte_scraper() -> AsyncGenerator[dict, None]:
                     logger.debug('[%s] Waiting %.1fs before next page', lt_name, delay)
                     await asyncio.sleep(delay)
 
+        await enricher.close()
         await browser.close()

@@ -25,8 +25,33 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES, city_index, city_url
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.seeff')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Search-result card: <div class="card-badges"><div class="card-badge badge-under-offer">Under Offer</div>…
+    # (other badges — "New", "Reduced" — are ignored).
+    'status_badge': '.card-badges .card-badge',
+    'status_map':   {},
+    # Listing page, one row per figure:
+    #   <div class="listing-details-info-detail">
+    #     <span class="info-detail-label">Monthly Levy</span>
+    #     <span class="info-detail-value">R7,233.50</span></div>
+    # A "Total" row and a "Monthly Repayment" (bond) row sit alongside —
+    # neither is a levy/rates label, so both are skipped.
+    'cost_rows':    '.listing-details-info-detail',
+    'cost_label':   '.info-detail-label',
+    'cost_value':   '.info-detail-value',
+    'description':  '.overview-content-intro',
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,7 +67,7 @@ USER_AGENT     = (
 SALE_BASE_PATH = BASE_URL + '/results/residential/for-sale/cape-town/'
 RENT_BASE_PATH = BASE_URL + '/results/residential/to-rent/cape-town/'
 
-# advanced_search UUID that scopes the sale search to Cape Town
+# advanced_search UUID that scopes the sale search to Cape Town (not used for other cities)
 SALE_SEARCH_ID = 'e2c1a2f7-a5b9-5184-a318-7964bc399818'
 
 # sale ≈ 310 listings / 16 per page ≈ 20 pages  (max 25 with margin)
@@ -126,8 +151,9 @@ def _extract_suburb_from_url(url: str) -> str | None:
     parts = [p for p in path.split('/') if p]
     # parts: ['results', 'residential', 'for-sale', 'cape-town', SUBURB, type, id]
     #          0            1               2            3           4      5    6
-    if len(parts) >= 5 and parts[3] == 'cape-town':
-        return parts[4]   # e.g. 'kenilworth-upper'
+    ct_idx = city_index(parts)
+    if ct_idx is not None and len(parts) > ct_idx + 1:
+        return parts[ct_idx + 1]   # e.g. 'kenilworth-upper'
     return None
 
 
@@ -270,6 +296,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
             }''')
             image_url = validate_image_url(raw_image)
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -286,6 +314,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -299,7 +329,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
+async def _run_seeff_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one listing dict at a time.
 
@@ -316,6 +346,8 @@ async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('seeff', browser, SELECTORS)
+        await enricher.start()
         context = await browser.new_context(
             user_agent=USER_AGENT,
             viewport={'width': 1280, 'height': 900},
@@ -324,8 +356,8 @@ async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
         )
 
         lt_configs = [
-            ('sale', SALE_BASE_PATH, SALE_SEARCH_ID),
-            ('rent', RENT_BASE_PATH, None),
+            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['slug'] == 'cape-town' else None),
+            ('rent', city_url(RENT_BASE_PATH, city), None),
         ]
 
         for lt_name, base_path, search_id in lt_configs:
@@ -392,6 +424,17 @@ async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
 
                 for card in new_cards:
                     seen_ids.add(card['listing_id'])
+                    await enricher.enrich(card)
                     yield card
 
+        await enricher.close()
         await browser.close()
+
+
+async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ seeff — %s ══', city['name'])
+        async for listing in _run_seeff_city(city):
+            listing['city'] = city['slug']
+            yield listing

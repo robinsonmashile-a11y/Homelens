@@ -40,8 +40,36 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES, city_index, city_url
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.jawitz')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Search-result card image overlay:
+    #   <div class="info-labels"><div class="transparent-red top left">UNDER OFFER</div>…
+    # The same box also carries "NEW", "PRICE REDUCED", "NO TRANSFER DUTY"
+    # (ignored) and a photo count in .transparent-black (ignored). The site's
+    # stylesheet also styles .transparent-black.sold — included in case a sold
+    # label uses it (text must still read "sold" to count).
+    'status_badge': '.info-labels .transparent-red, .info-labels .transparent-black.sold',
+    'status_map':   {},
+    # Listing page, label and value share one element:
+    #   <div class="bond-assumptions"><div class="pull-left">
+    #     <strong class="sub-headings-color">Monthly Levy</strong><br> R3,569.77</div>…
+    # (the value is the row's own text; "Deeds Office Levy" etc. sit in a
+    # separate transfer-cost table and are never matched)
+    'cost_rows':    '.bond-assumptions .pull-left',
+    'cost_label':   'strong.sub-headings-color',
+    'cost_value':   None,
+    'description':  '.listing-description',
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -85,8 +113,9 @@ def _extract_suburb_from_url(url: str) -> str | None:
     """
     path  = urlparse(url).path.rstrip('/')
     parts = [p for p in path.split('/') if p]
-    if len(parts) >= 5 and parts[3] == 'cape-town':
-        return parts[4]
+    ct_idx = city_index(parts)
+    if ct_idx is not None and len(parts) > ct_idx + 1:
+        return parts[ct_idx + 1]
     return None
 
 
@@ -260,6 +289,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 )
             image_url = validate_image_url(raw_image)
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -276,6 +307,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -289,7 +322,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_jawitz_scraper() -> AsyncGenerator[dict, None]:
+async def _run_jawitz_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one listing dict at a time.
 
@@ -305,10 +338,12 @@ async def run_jawitz_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('jawitz', browser, SELECTORS)
+        await enricher.start()
 
         lt_configs = [
-            ('sale', SALE_BASE),
-            ('rent', RENT_BASE),
+            ('sale', city_url(SALE_BASE, city)),
+            ('rent', city_url(RENT_BASE, city)),
         ]
 
         for lt_name, base_path in lt_configs:
@@ -349,6 +384,17 @@ async def run_jawitz_scraper() -> AsyncGenerator[dict, None]:
 
                 for card in new_cards:
                     seen_ids.add(card['listing_id'])
+                    await enricher.enrich(card)
                     yield card
 
+        await enricher.close()
         await browser.close()
+
+
+async def run_jawitz_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ jawitz — %s ══', city['name'])
+        async for listing in _run_jawitz_city(city):
+            listing['city'] = city['slug']
+            yield listing

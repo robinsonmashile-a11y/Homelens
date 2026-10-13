@@ -45,8 +45,32 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
+from scraper.cities import CITIES, city_index, city_url
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.engelvolkers')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # No status badge exists on E&V result cards (checked against a saved page
+    # of 35 cards) — status comes from the shared fallback on the card text.
+    'status_badge': None,
+    'status_map':   {},
+    # E&V has no structured levy/rates rows: agents type them into the
+    # description ("… Levies R4,692.00 Rates R1,280.00"). cost_rows is None on
+    # purpose, so costs come from the text fallback over the listing page and
+    # its description; the run report does not flag this site for that.
+    'text_only':    True,   # costs are never in structured rows; see above
+    'cost_rows':    None,
+    'cost_label':   None,
+    'cost_value':   None,
+    'description':  '[data-testid="expose-property-description-text"]',
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -402,6 +426,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
             }''')
             image_url = validate_image_url(raw_image)
 
+            status, status_source = await read_card_status(article, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -418,6 +444,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -431,7 +459,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_engelvolkers_scraper() -> AsyncGenerator[dict, None]:
+async def _run_engelvolkers_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one listing dict at a time.
 
@@ -447,10 +475,12 @@ async def run_engelvolkers_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('engelvolkers', browser, SELECTORS)
+        await enricher.start()
 
         lt_configs = [
-            ('sale', SALE_URL),
-            ('rent', RENT_URL),
+            ('sale', city_url(SALE_URL, city)),
+            ('rent', city_url(RENT_URL, city)),
         ]
 
         for lt_name, url in lt_configs:
@@ -470,6 +500,17 @@ async def run_engelvolkers_scraper() -> AsyncGenerator[dict, None]:
 
             for card in new_cards:
                 seen_ids.add(card['listing_id'])
+                await enricher.enrich(card)
                 yield card
 
+        await enricher.close()
         await browser.close()
+
+
+async def run_engelvolkers_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ engelvolkers — %s ══', city['name'])
+        async for listing in _run_engelvolkers_city(city):
+            listing['city'] = city['slug']
+            yield listing

@@ -26,8 +26,35 @@ from scraper.utils import (
     validate_image_url,
     SUBURB_MAP,
 )
+from scraper.cities import CITIES
+from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.pamgolding')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Search-result card: <ul class="results__item-banners">
+    #   <li class="results__item-banner-item"> Under offer</li> …
+    # (also "On Show", "Price reduced", "Exclusive mandate" — ignored).
+    # NB: the results page has a "Sold" filter button — outside any card, so
+    # it is never read; status is only taken from inside a card.
+    'status_badge': '.results__item-banner-item',
+    'status_map':   {},
+    # Listing page, "Expenses" block — two <div>s per figure:
+    #   <div class="price-display__container">
+    #     <div>Rates and Taxes:&nbsp;</div><div>R 4,986 per month</div></div>
+    #   <div class="price-display__container">
+    #     <div>Levies:&nbsp;</div><div>R 4,851 per month</div></div>
+    'cost_rows':    '.cashflow__container .price-display__container',
+    'cost_label':   'div:nth-of-type(1)',
+    'cost_value':   'div:nth-of-type(2)',
+    'description':  None,
+}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,6 +71,23 @@ USER_AGENT = (
 # Pagination: page 1 = base URL, page 2+ = base?page=N
 SALE_BASE_URL = BASE_URL + '/property-search/properties-for-sale-cape-town/3080'
 RENT_BASE_URL = BASE_URL + '/property-search/properties-to-rent-cape-town/3080?sort=1'
+
+# Johannesburg: Pam Golding only exposes it as regional areas. "Johannesburg
+# North" (ID 624, covers the northern suburbs: Sandton, Randburg, ...) is the
+# one confirmed to work for both sale and rent. Add further areas here
+# (e.g. Johannesburg South / East / West) once their IDs are known.
+CITY_SEARCH_URLS: dict[str, list[tuple[str, str]]] = {
+    'cape-town': [('sale', SALE_BASE_URL), ('rent', RENT_BASE_URL)],
+    'johannesburg': [
+        ('sale', BASE_URL + '/property-search/properties-for-sale-johannesburg-north-gauteng/624'),
+        ('rent', BASE_URL + '/property-search/properties-to-rent-johannesburg-north-gauteng/624'),
+    ],
+}
+
+# Set by _run_pamgolding_city. Cape Town results are filtered against the CT
+# suburb whitelist; other cities trust the city-scoped search and take the
+# suburb straight from the URL slug.
+_active_city: str = 'cape-town'
 
 # sale ≈ 537 listings / 20 per page ≈ 27 pages (set max to 35 with margin)
 # rent ≈ 200+ listings / 20 per page ≈ 10+ pages (set max to 20)
@@ -151,6 +195,13 @@ def _suburb_from_href(href: str) -> str | None:
     slug = parts[-2]
     words = slug.split('-')
     known = _CT_SLUG_SET  # canonical slug values from SUBURB_MAP
+
+    if _active_city != 'cape-town':
+        # No whitelist for other cities: the suburb is whatever follows "in".
+        if 'in' not in words:
+            return None
+        after = words[len(words) - words[::-1].index('in'):]  # after the LAST "in"
+        return normalise_suburb('-'.join(after)) if after else None
 
     # Try subsequences after the word "in"
     if 'in' in words:
@@ -342,6 +393,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
             }''')
             image_url = validate_image_url(raw_image)
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
@@ -358,6 +411,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         image_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             })
 
         except Exception as e:
@@ -371,7 +426,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # Main scraper generator
 # ---------------------------------------------------------------------------
 
-async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
+async def _run_pamgolding_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Async generator — yields one listing dict at a time.
 
@@ -380,6 +435,8 @@ async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
     retries once before treating the page as the end of results.
     Deduplicates globally to avoid yielding the same listing twice.
     """
+    global _active_city
+    _active_city = city['slug']
     seen_ids: set[str] = set()
 
     async with async_playwright() as pw:
@@ -387,6 +444,8 @@ async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
+        enricher = CostEnricher('pamgolding', browser, SELECTORS)
+        await enricher.start()
         context = await browser.new_context(
             user_agent=USER_AGENT,
             viewport={'width': 1280, 'height': 900},
@@ -394,7 +453,7 @@ async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
             timezone_id='Africa/Johannesburg',
         )
 
-        for lt_name, base_url in [('sale', SALE_BASE_URL), ('rent', RENT_BASE_URL)]:
+        for lt_name, base_url in CITY_SEARCH_URLS[city['slug']]:
             max_pages = MAX_PAGES[lt_name]
             logger.info('── Starting %s scrape (max %d pages) ──', lt_name, max_pages)
 
@@ -458,6 +517,17 @@ async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
 
                 for card in new_cards:
                     seen_ids.add(card['listing_id'])
+                    await enricher.enrich(card)
                     yield card
 
+        await enricher.close()
         await browser.close()
+
+
+async def run_pamgolding_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ pamgolding — %s ══', city['name'])
+        async for listing in _run_pamgolding_city(city):
+            listing['city'] = city['slug']
+            yield listing

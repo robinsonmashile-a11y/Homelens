@@ -25,8 +25,35 @@ from playwright.async_api import (
 )
 
 from .utils import clean_personal_info, normalise_price, parse_price, normalise_suburb, validate_image_url
+from .enrich import apply_costs, costs_from_texts, read_card_status
+from .extractors import cost_in_bounds
+
+from scraper.cities import CITIES, city_url
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SITE SELECTORS — listing status + monthly levy/rates.
+# The only place to edit when this site's markup changes. Confirmed against
+# saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
+# ═══════════════════════════════════════════════════════════════════════════
+SELECTORS = {
+    # Result card: <span class="… bg-remax-red/80 …">Offer Made</span> (also
+    # "New", "On Show", "Price Reduced", "Sole Mandate" — ignored). The page
+    # also has "Sold"/"Offer Made" filter buttons, outside any card.
+    'status_badge': 'span[class*="bg-remax-red"], span[class*="bg-remax-blue"]',
+    'status_map':   {'offer made': 'under_offer'},
+    # Listing page: the "Monthly Costs" accordion is collapsed (its rows are not
+    # in the DOM), but the Next.js payload carries the figures — quotes are
+    # backslash-escaped inside the script string:  \\"levy\\":2325.32,\\"rates\\":574.52
+    # 0 means "not set" and is discarded by the bounds check. "special_levies"
+    # is a one-off charge, NOT the monthly levy, and is deliberately not read.
+    'cost_json': {
+        'levy':  r'\\?"levy\\?"\s*:\s*(\d+(?:\.\d+)?)',
+        'rates': r'\\?"rates\\?"\s*:\s*(\d+(?:\.\d+)?)',
+    },
+    'description': None,
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -209,6 +236,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 except ValueError:
                     has_parking = False
 
+            status, status_source = await read_card_status(card, SELECTORS)
+
             card_dict: dict = {
                 'listing_id':        listing_id,
                 'source':            'remax',
@@ -220,6 +249,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'suburb_normalised': suburb_normalised,
                 'listing_url':       listing_url,
                 'is_active':         True,
+                'listing_status':    status,
+                'status_source':     status_source,
             }
             if bedrooms is not None:
                 card_dict['bedrooms'] = bedrooms
@@ -240,6 +271,26 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Detail page extraction
 # ---------------------------------------------------------------------------
+
+def _read_costs(page_html: str, page_text: str, description: str | None) -> dict:
+    """Levy/rates from the page's JSON payload ('site'), else the text fallback."""
+    found: dict[str, float] = {}
+    for kind, pattern in SELECTORS['cost_json'].items():
+        m = re.search(pattern, page_html)
+        if m:
+            amount = cost_in_bounds(kind, float(m.group(1)))
+            if amount is not None:
+                found[kind] = amount
+    if found:
+        return {
+            'levy_monthly':                  found.get('levy'),
+            'rates_monthly':                 found.get('rates'),
+            'levies_rates_combined_monthly': None,
+            'costs_source':                  'site',
+            'costs_raw_snippet':             ' '.join(f'{k}={v}' for k, v in found.items()),
+        }
+    return costs_from_texts(page_text, description)
+
 
 async def _extract_detail(page: Page, listing_type: str) -> dict:
     """
@@ -301,6 +352,12 @@ async def _extract_detail(page: Page, listing_type: str) -> dict:
             detail['has_garden'] = True
         if 'parking' in lower_text or 'garage' in lower_text or 'carport' in lower_text:
             detail['has_parking'] = True
+
+        # Monthly levy / rates — sale listings only (rental levies aren't shown).
+        # Site payload first, then the shared text fallback. The page is already
+        # loaded for every listing, so there is no extra visit.
+        if listing_type == 'sale':
+            apply_costs(detail, _read_costs(page_html, page_text, detail.get('description')))
 
         # Image — og:image is an HTML meta tag, available even when image requests are aborted
         raw_image = await page.evaluate('''() => {
@@ -453,7 +510,7 @@ async def _scrape_url(
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
-async def run_remax_scraper() -> AsyncGenerator[dict, None]:
+async def _run_remax_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     Yields all RE/MAX Cape Town listings (sale + rent).
     Scrapes the base Cape Town page first for maximum volume,
@@ -479,12 +536,14 @@ async def run_remax_scraper() -> AsyncGenerator[dict, None]:
 
         try:
             for listing_type, base_url in BASE_URLS.items():
-                # 1. All Cape Town (no suburb filter) — max volume
-                async for listing in _scrape_url(context, listing_type, base_url, 'cape-town'):
+                base_url = city_url(base_url, city)
+                # 1. Whole city (no suburb filter) — max volume
+                async for listing in _scrape_url(context, listing_type, base_url, city['slug']):
                     yield listing
 
-                # 2. Per suburb — catch anything the base page missed
-                for suburb in SUBURBS:
+                # 2. Per suburb — catch anything the base page missed.
+                #    SUBURBS is a Cape Town list, so other cities use the city page only.
+                for suburb in (SUBURBS if city['slug'] == 'cape-town' else []):
                     suburb_url = f'{base_url}/{suburb}'
                     async for listing in _scrape_url(context, listing_type, suburb_url, suburb):
                         yield listing
@@ -495,3 +554,12 @@ async def run_remax_scraper() -> AsyncGenerator[dict, None]:
         finally:
             await context.close()
             await browser.close()
+
+
+async def run_remax_scraper() -> AsyncGenerator[dict, None]:
+    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
+    for city in CITIES:
+        logger.info('══ remax — %s ══', city['name'])
+        async for listing in _run_remax_city(city):
+            listing['city'] = city['slug']
+            yield listing
