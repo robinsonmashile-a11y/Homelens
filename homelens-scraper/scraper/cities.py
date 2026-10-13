@@ -12,6 +12,7 @@ national list, so it must not be used.
 """
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 CITIES: list[dict] = [
@@ -21,7 +22,12 @@ CITIES: list[dict] = [
      'province': 'gauteng'},
 ]
 
-CITY_SLUGS = tuple(c['slug'] for c in CITIES)
+CITY_SLUGS = tuple(c['slug'] for c in CITIES)   # always all cities (URL parsing)
+
+# Optional filter, e.g. HOMELENS_CITIES=cape-town — lets CI run one city per job.
+_only = {c.strip() for c in os.environ.get('HOMELENS_CITIES', '').split(',') if c.strip()}
+if _only:
+    CITIES = [c for c in CITIES if c['slug'] in _only]
 
 
 def platform_suburb_from_url(url: str) -> tuple[str | None, str | None]:

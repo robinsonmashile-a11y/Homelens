@@ -13,30 +13,33 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
+    name: scrape (${{ matrix.scraper }}${{ matrix.cities && format(' / {0}', matrix.cities) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        scraper:
-          - pamgolding
-          - sothebys
-          - tyson
-          - rawson
-          - seeff
-          - remax
-          - quay1
-          - chaseveritt
-          - greeff
-          - jawitz
-          - engelvolkers
-          - century21
-          - harcourts
-          - lionlead
-          - abc_international
-          - justproperty
-          - dgproperties
-          - duarte
-          - exprealty
+        include:
+          - { scraper: pamgolding, cities: '' }
+          - { scraper: sothebys, cities: '' }
+          - { scraper: tyson, cities: '' }
+          - { scraper: seeff, cities: '' }
+          - { scraper: quay1, cities: '' }
+          - { scraper: chaseveritt, cities: '' }
+          - { scraper: greeff, cities: '' }
+          - { scraper: jawitz, cities: '' }
+          - { scraper: engelvolkers, cities: '' }
+          - { scraper: century21, cities: '' }
+          - { scraper: harcourts, cities: '' }
+          - { scraper: lionlead, cities: '' }
+          - { scraper: abc_international, cities: '' }
+          - { scraper: justproperty, cities: '' }
+          - { scraper: dgproperties, cities: '' }
+          - { scraper: duarte, cities: '' }
+          - { scraper: exprealty, cities: '' }
+          - { scraper: rawson, cities: cape-town }
+          - { scraper: rawson, cities: johannesburg }
+          - { scraper: remax, cities: cape-town }
+          - { scraper: remax, cities: johannesburg }
     defaults:
       run:
         working-directory: homelens-scraper
@@ -84,4 +87,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          HOMELENS_CITIES: ${{ matrix.cities }}
         run: python scripts/run_all_scrapers.py --only ${{ matrix.scraper }}
