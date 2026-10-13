@@ -68,6 +68,17 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
+      - name: Check secrets (lengths only)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "SUPABASE_URL length: ${#SUPABASE_URL} (expected 40)"
+          echo "SUPABASE_KEY length: ${#SUPABASE_KEY} (expected 219)"
+          echo "URL starts with https://: $([[ $SUPABASE_URL == https://* ]] && echo yes || echo NO)"
+          echo "KEY has whitespace: $([[ $SUPABASE_KEY =~ [[:space:]] ]] && echo YES || echo no)"
+
       - name: Run ${{ matrix.scraper }}
         if: steps.gate.outputs.run == 'true'
         env:
