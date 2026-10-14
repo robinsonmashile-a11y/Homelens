@@ -43,6 +43,21 @@ _POA_PATTERNS = (
 )
 
 
+class ForeignCurrencyError(Exception):
+    """A site showed prices in a non-rand currency (e.g. geo-localised USD).
+    Scrapers must abort rather than store these as rands."""
+
+
+_RAND_RE = re.compile(r'(?<![A-Za-z$])(R|ZAR)\s*\d')
+
+
+def assert_rand_price(price_text: str) -> None:
+    """Raise ForeignCurrencyError if price_text has digits but is not in rands.
+    'POA' / empty text pass (no digits)."""
+    if price_text and re.search(r'\d', price_text) and not _RAND_RE.search(price_text):
+        raise ForeignCurrencyError(f'non-rand price text: {price_text!r}')
+
+
 def parse_price(price_str: str) -> tuple[int | None, str]:
     """
     Parse a property price string and return (price, price_status).

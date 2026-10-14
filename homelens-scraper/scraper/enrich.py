@@ -34,6 +34,7 @@ import os
 import random
 from datetime import datetime, timezone
 
+from .utils import ForeignCurrencyError, assert_rand_price
 from .extractors import (
     classify_cost_label,
     cost_in_bounds,
@@ -140,6 +141,11 @@ async def read_costs_from_page(page, sel: dict) -> dict:
             value_text = (await value_el.inner_text()).strip()
             kind = classify_cost_label(label)
             if not kind or kind in found:
+                continue
+            try:
+                assert_rand_price(value_text)
+            except ForeignCurrencyError:
+                logger.warning('Skipping non-rand cost %r: %r', label, value_text)
                 continue
             amount = cost_in_bounds(kind, parse_money(value_text))
             if amount is None:

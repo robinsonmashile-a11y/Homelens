@@ -24,6 +24,8 @@ from scraper.utils import (
     normalise_suburb,
     compute_price_per_m2,
     validate_image_url,
+    ForeignCurrencyError,
+    assert_rand_price,
     SUBURB_MAP,
 )
 from scraper.cities import CITIES
@@ -344,6 +346,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 or await card.query_selector('.price-display')
             )
             price_text  = (await price_el.inner_text()).strip() if price_el else ''
+            assert_rand_price(price_text)
             price, price_status = parse_price(price_text)
             if not price_el:
                 price_status = 'extraction_failed'
@@ -415,6 +418,8 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'status_source':     status_source,
             })
 
+        except ForeignCurrencyError:
+            raise
         except Exception as e:
             logger.debug('Card parse error: %s', e)
             continue
@@ -465,6 +470,8 @@ async def _run_pamgolding_city(city: dict) -> AsyncGenerator[dict, None]:
                     raw_count, cards = await _fetch_page_cards(
                         context, url, lt_name, page_num
                     )
+                except ForeignCurrencyError:
+                    raise
                 except Exception as e:
                     logger.warning(
                         '[%s] page %d failed to load: %s — stopping this type',
@@ -483,6 +490,8 @@ async def _run_pamgolding_city(city: dict) -> AsyncGenerator[dict, None]:
                         raw_count, cards = await _fetch_page_cards(
                             context, url, lt_name, page_num
                         )
+                    except ForeignCurrencyError:
+                        raise
                     except Exception as e:
                         logger.warning(
                             '[%s] page %d retry failed: %s — stopping',
