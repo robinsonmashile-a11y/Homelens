@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import json
 import re
 from typing import AsyncGenerator
 
@@ -85,6 +86,24 @@ CITY_SEARCH_URLS: dict[str, list[tuple[str, str]]] = {
         ('rent', BASE_URL + '/property-search/properties-to-rent-johannesburg-north-gauteng/624'),
     ],
 }
+
+# The site calls /api/geo on load and, for visitors outside ZA (e.g. GitHub's US
+# runners), switches every price to the visitor's currency ("$ 129,303"). Answer
+# that call as if we were in South Africa so prices stay in rands.
+_GEO_ZA = {
+    'status': 'success', 'country': 'South Africa', 'countryCode': 'ZA',
+    'currency': 'ZAR',
+}
+
+
+async def force_rand_pricing(context, geo: dict = _GEO_ZA) -> None:
+    await context.route(
+        '**/api/geo*',
+        lambda route: route.fulfill(
+            status=200, content_type='application/json', body=json.dumps(geo),
+        ),
+    )
+
 
 # Set by _run_pamgolding_city. Cape Town results are filtered against the CT
 # suburb whitelist; other cities trust the city-scoped search and take the
@@ -449,14 +468,16 @@ async def _run_pamgolding_city(city: dict) -> AsyncGenerator[dict, None]:
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
-        enricher = CostEnricher('pamgolding', browser, SELECTORS)
-        await enricher.start()
         context = await browser.new_context(
             user_agent=USER_AGENT,
             viewport={'width': 1280, 'height': 900},
             locale='en-ZA',
             timezone_id='Africa/Johannesburg',
         )
+        await force_rand_pricing(context)
+        # Share the context so the enricher's detail pages also see rands.
+        enricher = CostEnricher('pamgolding', context, SELECTORS)
+        await enricher.start()
 
         for lt_name, base_url in CITY_SEARCH_URLS[city['slug']]:
             max_pages = MAX_PAGES[lt_name]
