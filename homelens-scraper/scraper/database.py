@@ -168,6 +168,7 @@ def upsert_listing(listing: dict) -> str:
     update_data = {
         'last_seen':       now,
         'is_active':       True,
+        **({'missed_runs': 0} if _has_missed_runs() else {}),
         'updated_at':      now,
         'last_scraped_at': now,
     }
@@ -251,6 +252,7 @@ def upsert_listing_by_url(listing: dict) -> str:
     update_data = {
         'last_seen':       now,
         'is_active':       True,
+        **({'missed_runs': 0} if _has_missed_runs() else {}),
         'updated_at':      now,
         'last_scraped_at': now,
     }
@@ -292,6 +294,28 @@ def upsert_listing_by_url(listing: dict) -> str:
 
     client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
     return 'unchanged'
+
+
+# A listing is only deactivated after being missed in this many consecutive
+# complete runs (guards against one-off scrape glitches hiding live listings).
+MISSED_RUNS_BEFORE_INACTIVE = 2
+
+_has_missed_runs_col: bool | None = None
+
+
+def _has_missed_runs() -> bool:
+    """True once supabase/migrations/add_missed_runs.sql has been applied."""
+    global _has_missed_runs_col
+    if _has_missed_runs_col is None:
+        try:
+            get_client().table('listings').select('missed_runs').limit(1).execute()
+            _has_missed_runs_col = True
+        except Exception:
+            logger.warning('listings.missed_runs column missing — run '
+                           'supabase/migrations/add_missed_runs.sql. Falling back to '
+                           'deactivating on the first miss.')
+            _has_missed_runs_col = False
+    return _has_missed_runs_col
 
 
 MAX_STALE_FRACTION = 0.25     # never deactivate more than this share of a source in one run
@@ -358,9 +382,46 @@ def mark_inactive_listings(source: str, active_ids: list, cities: list | None = 
 
     stale_list = list(stale_ids)
     batch = 200
+
+    # Two strikes: only deactivate listings already missed in the previous run.
+    to_deactivate = stale_list
+    bumped = 0
+    if _has_missed_runs():
+        to_deactivate = []
+        bump_by_value: dict[int, list[str]] = {}
+        for i in range(0, len(stale_list), batch):
+            chunk = stale_list[i:i + batch]
+            rows = (
+                client.table('listings')
+                .select('listing_id,missed_runs')
+                .eq('source', source)
+                .in_('listing_id', chunk)
+                .execute()
+                .data
+            )
+            for row in rows:
+                missed = (row.get('missed_runs') or 0) + 1
+                if missed >= MISSED_RUNS_BEFORE_INACTIVE:
+                    to_deactivate.append(row['listing_id'])
+                else:
+                    bump_by_value.setdefault(missed, []).append(row['listing_id'])
+        for missed, ids in bump_by_value.items():
+            for i in range(0, len(ids), batch):
+                try:
+                    (
+                        client.table('listings')
+                        .update({'missed_runs': missed})
+                        .eq('source', source)
+                        .in_('listing_id', ids[i:i + batch])
+                        .execute()
+                    )
+                    bumped += len(ids[i:i + batch])
+                except Exception as e:
+                    logger.warning('mark_inactive_listings: %s — could not bump missed_runs: %s', source, e)
+
     deactivated = 0
-    for i in range(0, len(stale_list), batch):
-        chunk = stale_list[i:i + batch]
+    for i in range(0, len(to_deactivate), batch):
+        chunk = to_deactivate[i:i + batch]
         try:
             (
                 client.table('listings')
@@ -377,8 +438,8 @@ def mark_inactive_listings(source: str, active_ids: list, cities: list | None = 
             )
 
     logger.info(
-        'mark_inactive_listings: %s — deactivated %d of %d stale listings',
-        source, deactivated, len(stale_list),
+        'mark_inactive_listings: %s — deactivated %d, flagged %d as missed once (of %d not seen)',
+        source, deactivated, bumped, len(stale_list),
     )
 
 
