@@ -136,6 +136,7 @@ async def run_scraper(
     Run one scraper generator, upsert all listings, write audit log.
     Returns a stats dict used in the final summary table.
     """
+    from scraper.cities import SCOPED_CITY_SLUGS
     from scraper.database import (
         log_scrape_run,
         mark_inactive_listings,
@@ -247,7 +248,7 @@ async def run_scraper(
     # Mark listings not seen in this run as inactive
     if active_ids:
         try:
-            mark_inactive_listings(source, active_ids)
+            mark_inactive_listings(source, active_ids, cities=SCOPED_CITY_SLUGS)
         except Exception as e:
             logger.warning('[%s] Could not mark inactive listings: %s', source, e)
 

@@ -294,7 +294,7 @@ def upsert_listing_by_url(listing: dict) -> str:
     return 'unchanged'
 
 
-def mark_inactive_listings(source: str, active_ids: list) -> None:
+def mark_inactive_listings(source: str, active_ids: list, cities: list | None = None) -> None:
     """
     Mark listings not seen in this scrape run as inactive.
 
@@ -310,14 +310,29 @@ def mark_inactive_listings(source: str, active_ids: list) -> None:
         return
     client = get_client()
 
-    existing = (
-        client.table('listings')
-        .select('listing_id')
-        .eq('source', source)
-        .eq('is_active', True)
-        .execute()
-    )
-    db_active_ids = {row['listing_id'] for row in existing.data}
+    # When a run covers only some cities (per-city CI jobs), only those cities'
+    # listings may be deactivated — the rest were simply not scraped.
+    # PostgREST caps a response at 1000 rows, so page through. Without this,
+    # sources with >1000 active listings (pamgolding, exprealty) never had
+    # their older listings deactivated — they became ghosts.
+    db_active_ids: set[str] = set()
+    page_size, offset = 1000, 0
+    while True:
+        query = (
+            client.table('listings')
+            .select('listing_id')
+            .eq('source', source)
+            .eq('is_active', True)
+            .order('listing_id')
+            .range(offset, offset + page_size - 1)
+        )
+        if cities:
+            query = query.in_('city', cities)
+        rows = query.execute().data
+        db_active_ids.update(row['listing_id'] for row in rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
     stale_ids = db_active_ids - set(active_ids)
 
     if not stale_ids:

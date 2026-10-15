@@ -29,6 +29,11 @@ _only = {c.strip() for c in os.environ.get('HOMELENS_CITIES', '').split(',') if 
 if _only:
     CITIES = [c for c in CITIES if c['slug'] in _only]
 
+# Cities this process is responsible for when HOMELENS_CITIES narrows the run
+# (None = all). mark_inactive must be limited to these, or a per-city CI job
+# would deactivate every other city's listings.
+SCOPED_CITY_SLUGS: list[str] | None = [c['slug'] for c in CITIES] if _only else None
+
 
 def platform_suburb_from_url(url: str) -> tuple[str | None, str | None]:
     """
