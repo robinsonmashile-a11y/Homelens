@@ -216,9 +216,9 @@ def test_parse_money():
 
 # ── status ────────────────────────────────────────────────────────────────────
 
-def test_under_offer_badge_real_card(browser):
+def test_under_offer_badge_real_card(browser):   # greeff card (quay1 has no badges since its Oct 2026 rebuild)
     from tests.conftest import FIXTURES
-    page = browser.load((FIXTURES / 'quay1_search.html').read_text(encoding='utf-8'))
+    page = browser.load((FIXTURES / 'greeff_search.html').read_text(encoding='utf-8'))
     badges = browser.run(page.eval_on_selector_all(
         '.card-badges .card-badge', 'els => els.map(e => e.innerText.trim())'))
     assert 'Under offer' in badges                   # real badge on a real card

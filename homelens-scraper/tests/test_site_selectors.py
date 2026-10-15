@@ -42,7 +42,6 @@ COSTS = {
     # test_levy_above_the_cap_is_discarded_real_page). Rates R14,800 is in bounds.
     'lionlead':     {1: {'rates': 8820.0}, 2: {'rates': 14800.0}, 3: {}},
     'pamgolding':   {1: {}, 2: {'rates': 4986.0, 'levy': 4851.0}, 3: {'rates': 14304.0}},
-    'quay1':        {1: {'levy': 1544.0, 'rates': 300.0}, 2: {'levy': 1291.0, 'rates': 663.0}, 3: {'rates': 6100.0}},
     'rawson':       {1: {'rates': 6800.0}, 2: {}, 3: {'rates': 800.0}},
     'seeff':        {1: {'rates': 817.0}, 2: {'levy': 672.28, 'rates': 532.27}, 3: {'rates': 2400.0}},
     'sothebys':     {1: {'rates': 2643.57}, 2: {'levy': 6000.0}, 3: {'levy': 6000.0}},
@@ -50,6 +49,9 @@ COSTS = {
 }
 # Sites whose levy/rates exist only as free text (SELECTORS['text_only']).
 TEXT_ONLY_COSTS = {
+    # quay1 (rebuilt Oct 2026): plain text on the listing page, e.g. "RATES  R 5 800 p/m".
+    # Re-captured 2026-10-15; values read off the saved pages.
+    'quay1':        {1: {'rates': 5800.0}, 2: {'levy': 875.0, 'rates': 200.0}, 3: {'levy': 3500.0}},
     'engelvolkers': {1: {'levy': 4692.0, 'rates': 1280.0}, 2: {}, 3: {}},
     'duarte':       {1: {}, 2: {}, 3: {}},
     # gumtree 3: real seller text "Rates And Taxes: 1800 / Levies: 2280" (bare numbers)
@@ -64,7 +66,7 @@ REMAX_COSTS = {1: {}, 2: {'rates': 1273.47998}, 3: {'levy': 2325.320068, 'rates'
 # 'dropped' documents the difference instead of hiding it.
 STATUS = {
     'century21':    (1, 0), 'chaseveritt': (2, 0), 'dgproperties': (1, 0), 'greeff': (4, 0),
-    'harcourts':    (3, 0), 'justproperty': (3, 2), 'quay1': (3, 0), 'sothebys': (3, 0),
+    'harcourts':    (3, 0), 'justproperty': (3, 2), 'quay1': (0, 0), 'sothebys': (3, 0),
     'tyson':        (0, 1), 'seeff': (2, 0),
     'jawitz':       (1, 0), 'lionlead': (3, 0), 'abc_international': (0, 0),
     'rawson':       (0, 1), 'engelvolkers': (0, 0), 'gumtree': (0, 0),

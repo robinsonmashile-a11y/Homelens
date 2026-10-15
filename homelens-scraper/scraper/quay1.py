@@ -2,8 +2,11 @@
 Quay 1 International Realty — Cape Town listing scraper.
 
 Scrapes Cape Town residential for-sale and to-rent listings from quay1.co.za.
-Uses the Cape Town area search pages; pagination follows ?page=N&advanced_search=UUID
-for sale, and ?page=N for rentals.
+
+The site was rebuilt in Oct 2026 (old /results/residential/... URLs now redirect):
+search pages are /properties?type=for-sale|to-rent&kind=residential, paginated
+with &page=N (24 cards/page). Quay 1 is a Cape Town agency, so only Cape Town is
+scraped.
 
 POPIA: no personal info stored; all description text is sanitised.
 """
@@ -13,7 +16,6 @@ import asyncio
 import logging
 import re
 from typing import AsyncGenerator
-from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Page
 
@@ -24,8 +26,10 @@ from scraper.utils import (
     normalise_suburb,
     compute_price_per_m2,
     validate_image_url,
+    ForeignCurrencyError,
+    assert_rand_price,
 )
-from scraper.cities import CITIES, city_index, city_url
+from scraper.cities import CITIES
 from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.quay1')
@@ -36,19 +40,13 @@ logger = logging.getLogger('homelens.quay1')
 # saved pages in tests/fixtures/ (re-capture: scripts/capture_fixtures.py).
 # ═══════════════════════════════════════════════════════════════════════════
 SELECTORS = {
-    # Search-result card: <div class="card-badges"><div class="card-badge">Under offer</div>…
-    # (other badges — "New", "Reduced" — are ignored).
-    'status_badge': '.card-badges .card-badge',
+    # The rebuilt site has no status badges on result cards, so status comes from
+    # the shared text fallback. Listing pages show levy/rates as plain text
+    # ("RATES  R 658 p/m"), which the shared text fallback also handles.
+    'status_badge': None,
     'status_map':   {},
-    # Listing page, one row per figure:
-    #   <div class="listing-details-info-detail">
-    #     <span class="info-detail-label">Monthly Levy</span>
-    #     <span class="info-detail-value">R7,233.50</span></div>
-    # A "Total" row sits alongside — it is skipped by label, never used.
-    'cost_rows':    '.listing-details-info-detail',
-    'cost_label':   '.info-detail-label',
-    'cost_value':   '.info-detail-value',
-    'description':  '.overview-content-intro',
+    'cost_rows':    None,
+    'description':  None,
 }
 
 
@@ -63,17 +61,19 @@ USER_AGENT     = (
     'Chrome/124.0.0.0 Safari/537.36'
 )
 
-SALE_BASE_PATH = BASE_URL + '/results/residential/for-sale/cape-town/'
-RENT_BASE_PATH = BASE_URL + '/results/residential/to-rent/cape-town/'
+SALE_BASE_PATH = BASE_URL + '/properties?type=for-sale&kind=residential'
+RENT_BASE_PATH = BASE_URL + '/properties?type=to-rent&kind=residential'
 
-# advanced_search UUID that scopes results to Cape Town (not used for other cities)
-SALE_SEARCH_ID = 'e2c1a2f7-a5b9-5184-a318-7964bc399818'
+# Result cards: <a href="/for-sale|to-rent/{suburb}/{slug}-{code}"> with the
+# price in a <p class="font-serif">. Nav / suburb-filter links have only 2 path
+# segments and no price, so they never match.
+CARD_SELECTOR = 'a[href^="/for-sale/"], a[href^="/to-rent/"]'
 
-# sale ≈ 226 listings / 16 per page ≈ 15 pages  (max 20 with margin)
-# rent ≈ 417 listings / 16 per page ≈ 27 pages  (max 35 with margin)
+# sale ≈ 21 pages x 24, rent similar; generous margin — pagination stops on an
+# empty page or when a page repeats.
 MAX_PAGES: dict[str, int] = {
-    'sale': 20,
-    'rent': 35,
+    'sale': 40,
+    'rent': 60,
 }
 
 SCROLL_STEPS   = 12    # increments to trigger lazy-loaded cards
@@ -87,23 +87,16 @@ RETRY_WAIT     = 15.0  # seconds to wait before retrying an empty page
 # ---------------------------------------------------------------------------
 
 def _page_url(base: str, page: int, search_id: str | None = None) -> str:
-    """Build the URL for a given page number.
-
-    Sale page 1:  base?advanced_search=UUID
-    Sale page N:  base?page=N&advanced_search=UUID
-    Rent page 1:  base  (no params needed)
-    Rent page N:  base?page=N
-    """
-    if page == 1:
-        return (base + f'?advanced_search={search_id}') if search_id else base
-    if search_id:
-        return f'{base}?page={page}&advanced_search={search_id}'
-    return f'{base}?page={page}'
+    """Page 1 is the base URL; page N appends &page=N."""
+    return base if page == 1 else f'{base}&page={page}'
 
 
 def _parse_beds(text: str) -> int | None:
-    m = re.search(r'(\d+)\s*bed', text, re.I)
-    return int(m.group(1)) if m else None
+    m = re.search(r'(\d+(?:\.\d+)?)\s*bed', text, re.I)
+    if not m:
+        return None
+    # "0.5 BED" is how the site shows a studio; stored as 0 (see fix_suburbs).
+    return int(float(m.group(1)))
 
 
 def _parse_baths(text: str) -> int | None:
@@ -121,28 +114,6 @@ def _parse_size(text: str) -> float | None:
             return val if 10 <= val <= 50_000 else None
         except ValueError:
             return None
-    return None
-
-
-def _extract_suburb_from_url(url: str) -> str | None:
-    """
-    Extract suburb slug from a Quay1 listing URL path.
-
-    URL format:
-      /results/residential/for-sale/cape-town/SUBURB/type/id/
-      /results/residential/to-rent/cape-town/SUBURB/type/id/
-
-    Example:
-      /results/residential/for-sale/cape-town/kenilworth/apartment/3176339/
-      → 'kenilworth'
-    """
-    path  = urlparse(url).path.rstrip('/')
-    parts = [p for p in path.split('/') if p]
-    # parts: ['results', 'residential', 'for-sale', 'cape-town', SUBURB, type, id]
-    #          0            1               2            3           4      5    6
-    ct_idx = city_index(parts)
-    if ct_idx is not None and len(parts) > ct_idx + 1:
-        return parts[ct_idx + 1]   # e.g. 'kenilworth'
     return None
 
 
@@ -172,18 +143,21 @@ async def _fetch_page_cards(
     """
     Load a single search results page and return (raw_card_count, listing_dicts).
 
-    raw_card_count — total a.property-card-sm elements found.
+    raw_card_count — total listing cards found.
     listing_dicts  — parsed listings from this page.
     """
     page = await context.new_page()
     try:
         logger.info('  [%s] Scraping page %d → %s', lt_name, page_num, url)
-        await page.goto(url, wait_until='networkidle', timeout=60_000)
+        await page.goto(url, wait_until='domcontentloaded', timeout=45_000)
+        try:
+            await page.wait_for_selector(CARD_SELECTOR, timeout=20_000)
+        except Exception:
+            pass                      # empty page (end of results) or slow load
         await asyncio.sleep(PAGE_LOAD_WAIT)
         await _scroll_to_load_all(page)
 
-        raw_cards = await page.query_selector_all('a.property-card-sm')
-        raw_count = len(raw_cards)
+        raw_count = len(await page.eval_on_selector_all(CARD_SELECTOR, _CARD_JS))
 
         listings = await _extract_cards(page, lt_name)
         logger.info(
@@ -199,100 +173,80 @@ async def _fetch_page_cards(
             pass
 
 
+_CARD_JS = """cards => cards.map(a => {
+  const href = a.getAttribute('href') || '';
+  if (href.split('/').filter(Boolean).length !== 3) return null;     // not a listing
+  const priceEl = a.querySelector('p.font-serif');
+  if (!priceEl) return null;
+  const ps = [...a.querySelectorAll('div.p-5 > p')].map(p => p.innerText.trim());
+  const img = a.querySelector('img');
+  return {
+    href, ps,
+    src: img ? (img.getAttribute('src') || '') : '',
+    srcset: img ? (img.getAttribute('srcset') || '') : '',
+    text: a.innerText || '',
+  };
+}).filter(Boolean)"""
+
+_CODE_RE = re.compile(r'-([a-z]{1,3}\d+)$')
+
+
+def _pick_image(src: str, srcset: str) -> str | None:
+    """Prefer the 640px rendition from srcset; fall back to src."""
+    urls = [part.strip().split(' ')[0] for part in srcset.split(',') if part.strip()]
+    best = next((u for u in urls if 'w_640' in u), urls[0] if urls else src)
+    return validate_image_url(best or src)
+
+
 async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
     """
-    Extract all listing dicts from a.property-card-sm elements.
+    Extract listing dicts from the result cards on a /properties page.
 
-    On Quay1, the card element is an <a> anchor — the href is on the card itself,
-    not on a child element.
-
-    Stat order in .card-stats > div > p can vary:
-      "N Bed"  |  "N Bath"  |  "N Parking" (optional)  |  "Nm²"
-    We identify each by parsing the text, not by position.
+    Per card (div.p-5 > p, in order): price | title | "Type · Suburb" | stats
+    ("2 BED · 1 BATH · 1 PARKING · 54 M²"; stats are absent on some listings).
     """
-    cards = await page.query_selector_all('a.property-card-sm')
-    if not cards:
-        return []
+    from scraper.enrich import resolve_status
 
+    cards = await page.eval_on_selector_all(CARD_SELECTOR, _CARD_JS)
     results: list[dict] = []
 
-    for card in cards:
+    for c in cards:
         try:
-            # ── Listing ID ──────────────────────────────────────────────────
-            data_id = (await card.get_attribute('data-id') or '').strip()
-            if not data_id:
+            href = c['href']
+            path_parts = [x for x in href.split('/') if x]
+            ltype = 'sale' if path_parts[0] == 'for-sale' else 'rent'
+
+            m = _CODE_RE.search(path_parts[2])
+            if not m:
                 continue
-            listing_id = f'quay1_{data_id}'
+            listing_id = f'quay1_{m.group(1)}'          # e.g. quay1_rl1493
+            full_url   = BASE_URL + href
 
-            # ── URL ─────────────────────────────────────────────────────────
-            # The card IS the anchor — href is directly on the card element.
-            href = (await card.get_attribute('href') or '').strip()
-            if not href:
-                continue
-            full_url = BASE_URL + href if href.startswith('/') else href
+            ps         = c['ps'] + [''] * 4
+            price_text = ps[0]
+            title      = ps[1] or path_parts[2].replace('-', ' ').title()
+            type_line  = ps[2]
+            stats      = ps[3]
 
-            # ── Title ───────────────────────────────────────────────────────
-            desc_el = await card.query_selector('.card-description')
-            title   = (await desc_el.inner_text()).strip() if desc_el else ''
-            if not title:
-                slug  = href.rstrip('/').split('/')[-2] if '/' in href else ''
-                title = slug.replace('-', ' ').title()
+            suburb_text = type_line.split('·', 1)[1].strip() if '·' in type_line else path_parts[1]
+            suburb_normalised = (
+                normalise_suburb(re.sub(r'\s+', '-', suburb_text.strip().lower())) if suburb_text else None
+            )
 
-            # ── Suburb (from URL path, already hyphenated slug) ──────────────
-            suburb_slug       = _extract_suburb_from_url(full_url)
-            suburb_normalised = normalise_suburb(suburb_slug) if suburb_slug else None
-
-            # ── Price ────────────────────────────────────────────────────────
-            price_el    = await card.query_selector('.card-price')
-            price_text  = (await price_el.inner_text()).strip() if price_el else ''
             price, price_status = parse_price(price_text)
-            if not price_el:
-                price_status = 'extraction_failed'
+            assert_rand_price(price_text)
 
-            # ── Beds / Baths / Size ──────────────────────────────────────────
-            # Each stat is in a div > p inside .card-stats:
-            #   "2 Bed"  |  "1 Bath"  |  "1 Parking" (skip)  |  "80m²"
-            stat_els  = await card.query_selector_all('.card-stats > div > p')
-            bedrooms  = None
-            bathrooms = None
-            size_m2   = None
+            bedrooms  = _parse_beds(stats)
+            bathrooms = _parse_baths(stats)
+            size_m2   = _parse_size(stats.lower()) if re.search(r'm\s*[²2]', stats, re.I) else None
 
-            for stat_el in stat_els:
-                text    = (await stat_el.inner_text()).strip()
-                text_lc = text.lower()
-                if 'bed' in text_lc and bedrooms is None:
-                    bedrooms = _parse_beds(text)
-                elif 'bath' in text_lc and bathrooms is None:
-                    bathrooms = _parse_baths(text)
-                elif 'm' in text_lc and size_m2 is None:
-                    candidate = _parse_size(text)
-                    if candidate:
-                        size_m2 = candidate
-
-            # ── Image — card thumbnail ───────────────────────────────────────
-            raw_image = await card.evaluate('''card => {
-                const selectors = [
-                    ".card-image img", ".card-media img", ".card-photo img",
-                    ".card-header img", "img[class*=\\"card\\"]",
-                    "img[class*=\\"property\\"]", "img[loading=\\"lazy\\"]", "img"
-                ];
-                for (const sel of selectors) {
-                    const img = card.querySelector(sel);
-                    if (!img) continue;
-                    const src = img.src || img.dataset.src || img.getAttribute("data-src");
-                    if (src && src.startsWith("http")) return src;
-                }
-                return null;
-            }''')
-            image_url = validate_image_url(raw_image)
-
-            status, status_source = await read_card_status(card, SELECTORS)
+            status, status_source = resolve_status([], c['text'], SELECTORS)
 
             results.append({
                 'listing_id':        listing_id,
                 'listing_url':       full_url,
                 'source':            'quay1',
-                'listing_type':      listing_type,
+                'listing_type':      ltype,
                 'title':             clean_personal_info(title[:250]),
                 'price':             price,
                 'price_status':      price_status,
@@ -302,12 +256,14 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'suburb_normalised': suburb_normalised,
                 'description':       None,
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
-                'image_url':         image_url,
+                'image_url':         _pick_image(c['src'], c['srcset']),
                 'is_active':         True,
                 'listing_status':    status,
                 'status_source':     status_source,
             })
 
+        except ForeignCurrencyError:
+            raise
         except Exception as e:
             logger.debug('Card parse error: %s', e)
             continue
@@ -331,6 +287,10 @@ async def _run_quay1_city(city: dict) -> AsyncGenerator[dict, None]:
     """
     seen_ids: set[str] = set()
 
+    if city['slug'] != 'cape-town':
+        logger.info('quay1 only lists Cape Town properties — skipping %s', city['name'])
+        return
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -346,8 +306,8 @@ async def _run_quay1_city(city: dict) -> AsyncGenerator[dict, None]:
         )
 
         lt_configs = [
-            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['slug'] == 'cape-town' else None),
-            ('rent', city_url(RENT_BASE_PATH, city), None),
+            ('sale', SALE_BASE_PATH, None),
+            ('rent', RENT_BASE_PATH, None),
         ]
 
         for lt_name, base_path, search_id in lt_configs:

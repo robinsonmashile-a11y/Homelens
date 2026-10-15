@@ -43,7 +43,7 @@ SITES: dict[str, tuple[str, str, str]] = {
     'harcourts':         (harcourts.SALE_BASE, *_PROPDATA_CARD),
     'justproperty':      (justproperty.SALE_BASE, *_PROPDATA_CARD),
     'sothebys':          (sothebys.SALE_BASE, *_PROPDATA_CARD),
-    'quay1':             (quay1._page_url(quay1.SALE_BASE_PATH, 1, quay1.SALE_SEARCH_ID), *_PROPDATA_CARD),
+    'quay1':             (quay1._page_url(quay1.SALE_BASE_PATH, 1), 'a[href^="/for-sale/"]:has(p.font-serif)', 'href'),
     'tyson':             (tyson._page_url(tyson.SALE_BASE_PATH, 1, tyson.SALE_SEARCH_ID), *_PROPDATA_CARD),
     'jawitz':            (jawitz.SALE_BASE, *_PROPDATA_LIST),
     'lionlead':          (lionlead.SALE_BASE, *_PROPDATA_LIST),

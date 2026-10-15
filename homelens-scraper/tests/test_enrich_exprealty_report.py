@@ -40,11 +40,12 @@ def test_sold_out_in_a_real_card_stays_live(browser):
     browser.run(page.evaluate("""() => {
         const p = document.createElement('p');
         p.textContent = 'Our last three units sold out in 3 days!';
-        document.querySelector('a.property-card-sm').appendChild(p);
+        [...document.querySelectorAll('a[href^="/for-sale/"]')]
+            .find(a => a.querySelector('p.font-serif')).appendChild(p);
     }"""))
     cards = browser.run(quay1._extract_cards(page, 'sale'))
     first = cards[0]
-    assert first['listing_status'] == 'live'      # first card has no under-offer badge
+    assert first['listing_status'] == 'live'      # marketing text must not flip status
 
 
 # ── CostEnricher ──────────────────────────────────────────────────────────────
