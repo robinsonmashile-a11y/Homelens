@@ -118,8 +118,8 @@ def _info(msg: str)  -> str: return f'      {msg}'
 # Data fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_active_listings() -> list[dict]:
-    """Fetch all active listings from Supabase (paginated)."""
+def _fetch_active_listings(city: str = 'cape-town') -> list[dict]:
+    """Fetch all active listings (one city, or 'all') from Supabase (paginated)."""
     from scraper.database import get_client
     client  = get_client()
     batch   = 1000
@@ -127,7 +127,7 @@ def _fetch_active_listings() -> list[dict]:
     results = []
 
     while True:
-        resp = (
+        query = (
             client.table('listings')
             .select(
                 'listing_id, source, listing_type, price, price_status,'
@@ -135,9 +135,10 @@ def _fetch_active_listings() -> list[dict]:
                 'size_m2, property_type, listing_url, title, is_active'
             )
             .eq('is_active', True)
-            .range(offset, offset + batch - 1)
-            .execute()
         )
+        if city != 'all':
+            query = query.eq('city', city)
+        resp = query.order('listing_id').range(offset, offset + batch - 1).execute()
         chunk = resp.data or []
         results.extend(chunk)
         if len(chunk) < batch:
@@ -445,16 +446,17 @@ KNOWN_ISSUES = """
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_checks(stage: str) -> None:
+def run_checks(stage: str, city: str = 'cape-town') -> None:
     print()
     print('═' * 70)
     print(f'  HOMELENS DATA QUALITY VALIDATOR  —  stage: {stage.upper()}')
     print(f'  {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}')
     print('═' * 70)
     print()
+    print(f'  City: {city}')
     print('  Fetching active listings from Supabase...')
 
-    rows = _fetch_active_listings()
+    rows = _fetch_active_listings(city)
     print(f'  Loaded {len(rows):,} active listings.\n')
 
     if not rows:
@@ -547,5 +549,9 @@ if __name__ == '__main__':
         default='post-scrape',
         help='post-scrape: run after run_all_scrapers.py. post-suburb: run after fix_suburbs.py.',
     )
+    parser.add_argument(
+        '--city', default='cape-town',
+        help="city slug to validate, or 'all' (default: cape-town; thresholds are Cape Town-sized)",
+    )
     args = parser.parse_args()
-    run_checks(args.stage)
+    run_checks(args.stage, args.city)

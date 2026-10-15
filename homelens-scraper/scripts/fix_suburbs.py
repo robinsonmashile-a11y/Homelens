@@ -376,6 +376,35 @@ def is_studio(title: str | None) -> bool:
     return bool(title and _STUDIO_RE.search(title))
 
 
+# Only Cape Town has a suburb dictionary (and the engine / investment model are
+# Cape Town only), so this script must not touch other cities' listings.
+CITY = 'cape-town'
+
+
+class _Rows:
+    def __init__(self, data):
+        self.data = data
+
+
+def _paged(query, page_size: int = 1000) -> _Rows:
+    """Run a select for CITY across all pages. (.limit(20000) is silently capped
+    at 1000 rows by PostgREST, which made this script process a random slice.)"""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        chunk = (
+            query.eq('city', CITY)
+            .order('listing_id')
+            .range(offset, offset + page_size - 1)
+            .execute()
+            .data
+        )
+        rows.extend(chunk)
+        if len(chunk) < page_size:
+            return _Rows(rows)
+        offset += page_size
+
+
 def _bulk_update(supabase, ids: list[str], payload: dict, batch_size: int = 200) -> int:
     """Apply payload to all listing_ids in batched .in_() calls."""
     total = 0
@@ -397,62 +426,48 @@ def run_suburb_fix() -> None:
 
     # ── Fetch all data first (read-only phase) ────────────────────────────────
     print('Fetching listings...')
-    active_result = (
+    active_result = _paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised, '
                 'bedrooms, property_type')
         .eq('is_active', True)
-        .limit(20000)
-        .execute()
     )
-    inactive_null = (
+    inactive_null = _paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised')
         .eq('is_active', False)
         .is_('suburb_normalised', 'null')
-        .limit(20000)
-        .execute()
     )
-    inactive_empty = (
+    inactive_empty = _paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised')
         .eq('is_active', False)
         .eq('suburb_normalised', '')
-        .limit(20000)
-        .execute()
     )
-    no_price_null = (
+    no_price_null = _paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .is_('price', 'null')
-        .limit(20000)
-        .execute()
     )
-    no_price_zero = (
+    no_price_zero = _paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .eq('price', 0)
-        .limit(20000)
-        .execute()
     )
     # Listings with no current price but a known first-seen price — likely unavailable/sold/let
-    price_gone_result = (
+    price_gone_result = _paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb_normalised, listing_type, price_at_first, listing_url, price_status, last_seen')
         .is_('price', 'null')
         .not_.is_('price_at_first', 'null')
-        .limit(20000)
-        .execute()
     )
-    commercial = (
+    commercial = _paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .eq('property_type', 'other')
-        .limit(20000)
-        .execute()
     )
     # Inactive listings that still LOOK complete (price+suburb+type ok) but were
     # deactivated. We do NOT reactivate them (that resurrects dead listings — the
@@ -460,7 +475,7 @@ def run_suburb_fix() -> None:
     # the investment rent model, so we flag those as is_reference = TRUE. They
     # remain is_active = FALSE and never appear in user-facing results; only
     # compute_investment.py reads them, within a recency window.
-    good_but_inactive_result = (
+    good_but_inactive_result = _paged(
         supabase.table('listings')
         .select('listing_id,listing_type')
         .eq('is_active', False)
@@ -469,8 +484,6 @@ def run_suburb_fix() -> None:
         .not_.is_('suburb_normalised', 'null')
         .neq('suburb_normalised', '')
         .in_('property_type', ['apartment', 'house'])
-        .limit(20000)
-        .execute()
     )
 
     active_listings   = active_result.data

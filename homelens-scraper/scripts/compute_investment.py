@@ -862,6 +862,7 @@ def fetch_rental_corpus(client) -> list[dict]:
         .select('suburb_normalised,bedrooms,property_type,price,size_m2,'
                 'is_luxury,is_outlier,is_active,is_reference,last_seen')
         .eq('listing_type', 'rent')
+        .eq('city', 'cape-town')   # rent model + CT rates; suburb names repeat across cities
         .range(off, off + lim - 1)
         .execute()
     ))
