@@ -294,6 +294,10 @@ def upsert_listing_by_url(listing: dict) -> str:
     return 'unchanged'
 
 
+MAX_STALE_FRACTION = 0.25     # never deactivate more than this share of a source in one run
+MIN_ACTIVE_FOR_BREAKER = 40   # ...once a source is big enough for the ratio to mean anything
+
+
 def mark_inactive_listings(source: str, active_ids: list, cities: list | None = None) -> None:
     """
     Mark listings not seen in this scrape run as inactive.
@@ -334,6 +338,19 @@ def mark_inactive_listings(source: str, active_ids: list, cities: list | None = 
             break
         offset += page_size
     stale_ids = db_active_ids - set(active_ids)
+
+    # Circuit breaker: a run that saw far fewer listings than we hold as active
+    # is almost certainly incomplete (page timeout, block, site change), not a
+    # genuine mass delisting. Deactivating then hides live listings.
+    if (len(db_active_ids) >= MIN_ACTIVE_FOR_BREAKER
+            and len(stale_ids) > MAX_STALE_FRACTION * len(db_active_ids)
+            and not os.environ.get('FORCE_MARK_INACTIVE')):
+        logger.error(
+            'mark_inactive_listings: %s — REFUSING to deactivate %d of %d active '
+            '(>%d%%): run looks incomplete. Set FORCE_MARK_INACTIVE=1 to override.',
+            source, len(stale_ids), len(db_active_ids), int(MAX_STALE_FRACTION * 100),
+        )
+        return
 
     if not stale_ids:
         logger.info('mark_inactive_listings: %s — nothing stale', source)

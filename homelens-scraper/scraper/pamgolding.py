@@ -105,6 +105,9 @@ async def force_rand_pricing(context, geo: dict = _GEO_ZA) -> None:
     )
 
 
+PAGE_LOAD_ATTEMPTS = 3
+
+
 # Set by _run_pamgolding_city. Cape Town results are filtered against the CT
 # suburb whitelist; other cities trust the city-scoped search and take the
 # suburb straight from the URL slug.
@@ -488,9 +491,22 @@ async def _run_pamgolding_city(city: dict) -> AsyncGenerator[dict, None]:
 
                 # ── Load page ────────────────────────────────────────────────
                 try:
-                    raw_count, cards = await _fetch_page_cards(
-                        context, url, lt_name, page_num
-                    )
+                    for attempt in range(1, PAGE_LOAD_ATTEMPTS + 1):
+                        try:
+                            raw_count, cards = await _fetch_page_cards(
+                                context, url, lt_name, page_num
+                            )
+                            break
+                        except ForeignCurrencyError:
+                            raise
+                        except Exception as e:
+                            if attempt == PAGE_LOAD_ATTEMPTS:
+                                raise
+                            logger.warning(
+                                '[%s] page %d load failed (attempt %d/%d): %s — retrying',
+                                lt_name, page_num, attempt, PAGE_LOAD_ATTEMPTS, e,
+                            )
+                            await asyncio.sleep(RETRY_WAIT)
                 except ForeignCurrencyError:
                     raise
                 except Exception as e:
