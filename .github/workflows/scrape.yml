@@ -90,16 +90,20 @@ jobs:
           HOMELENS_CITIES: ${{ matrix.cities }}
         run: python scripts/run_all_scrapers.py --only ${{ matrix.scraper }}
 
-  # Runs once, after every scraper job has finished (pass or fail). Scrapers set
-  # is_active=true on every sighting, so this re-applies the rules that keep
-  # listings out of the baselines: no suburb / no price / commercial / sold /
-  # under offer. Cape Town only (see scripts/fix_suburbs.py).
+  # Runs once, after every scraper job has finished (pass or fail).
+  # 1. fix_suburbs: scrapers set is_active=true on every sighting, so this
+  #    re-applies the rules that keep listings out of the baselines (no suburb /
+  #    no price / commercial / sold / under offer). Cape Town only.
+  # 2. engine -> investment scores -> explanations, in that order, so they only
+  #    ever read the cleaned data.
   fix-suburbs:
     needs: scrape
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    name: fix suburbs
+    timeout-minutes: 120
+    name: fix suburbs + engine
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     defaults:
       run:
         working-directory: homelens-scraper
@@ -120,3 +124,23 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scripts/fix_suburbs.py
+
+      - name: Run engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/run_engine.py
+
+      - name: Compute investment scores
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/compute_investment.py
+
+      # Needs an ANTHROPIC_API_KEY repo secret; skipped (not failed) without one.
+      - name: Generate explanations
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/generate_explanations.py
