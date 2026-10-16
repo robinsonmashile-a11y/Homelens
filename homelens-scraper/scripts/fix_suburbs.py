@@ -13,9 +13,14 @@ they cannot be scored without a suburb.
 
 import os
 import re
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from supabase import create_client
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scraper.property_types import looks_non_residential  # noqa: E402
 
 # ── Step 1: Cape Town suburb dictionary ──────────────────────────────────────
 
@@ -474,7 +479,7 @@ def run_suburb_fix() -> None:
     )
     commercial = _paged(
         supabase.table('listings')
-        .select('listing_id')
+        .select('listing_id, title, bedrooms')
         .eq('is_active', True)
         .eq('property_type', 'other')
     )
@@ -498,7 +503,11 @@ def run_suburb_fix() -> None:
     active_listings   = active_result.data
     inactive_listings = inactive_null.data + inactive_empty.data
     no_price_ids      = list({r['listing_id'] for r in no_price_null.data + no_price_zero.data})
-    commercial_ids    = [r['listing_id'] for r in commercial.data]
+    # 'other' also holds real homes whose title has no type word ("SAGEWOOD"),
+    # so only farms/land/commercial (by keyword) and listings with no bedrooms
+    # are deactivated; a bedroomed 'other' with no such word stays active.
+    commercial_ids    = [r['listing_id'] for r in commercial.data
+                         if looks_non_residential(r.get('title')) or not r.get('bedrooms')]
     not_live_ids      = [r['listing_id'] for r in not_live.data]
     price_gone        = price_gone_result.data
     good_but_inactive_ids = [r['listing_id'] for r in good_but_inactive_result.data]

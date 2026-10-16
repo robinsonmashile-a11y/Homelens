@@ -31,6 +31,7 @@ from scraper.utils import (
 )
 from scraper.cities import CITIES
 from scraper.enrich import CostEnricher, read_card_status
+from scraper.property_types import classify_property_type
 
 logger = logging.getLogger('homelens.quay1')
 
@@ -241,6 +242,11 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
             size_m2   = _parse_size(stats.lower()) if re.search(r'm\s*[²2]', stats, re.I) else None
 
             status, status_source = resolve_status([], c['text'], SELECTORS)
+            # The card's own type label ("Sectional Title · Camps Bay") first, title second.
+            ptype = (classify_property_type(type_line.split('·', 1)[0])
+                     or 'other')
+            if ptype == 'other':
+                ptype = classify_property_type(title)
 
             results.append({
                 'listing_id':        listing_id,
@@ -258,6 +264,7 @@ async def _extract_cards(page: Page, listing_type: str) -> list[dict]:
                 'price_per_m2':      compute_price_per_m2(price, size_m2),
                 'image_url':         _pick_image(c['src'], c['srcset']),
                 'is_active':         True,
+                'property_type':     ptype,
                 'listing_status':    status,
                 'status_source':     status_source,
             })

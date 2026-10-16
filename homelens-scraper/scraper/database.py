@@ -144,7 +144,7 @@ def upsert_listing(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen, listing_status')
+        .select('listing_id, price, price_history, first_seen, listing_status, property_type')
         .eq('listing_id', listing['listing_id'])
         .execute()
     )
@@ -178,6 +178,12 @@ def upsert_listing(listing: dict) -> str:
         update_data['image_url'] = listing['image_url']
 
     _merge_status_and_costs(listing, old, update_data, now)
+
+    # A type the scraper read from the card fills a missing/'other' type only;
+    # it never overwrites a type the engine or an earlier run already settled.
+    new_ptype = listing.get('property_type')
+    if new_ptype and new_ptype != 'other' and (old.get('property_type') or 'other') == 'other':
+        update_data['property_type'] = new_ptype
 
     # Always propagate price_status when the scraper has a definitive answer.
     # 'unknown' means the selector found nothing (transient); don't overwrite a
@@ -228,7 +234,7 @@ def upsert_listing_by_url(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen, listing_status')
+        .select('listing_id, price, price_history, first_seen, listing_status, property_type')
         .eq('listing_url', listing['listing_url'])
         .execute()
     )
@@ -262,6 +268,12 @@ def upsert_listing_by_url(listing: dict) -> str:
         update_data['image_url'] = listing['image_url']
 
     _merge_status_and_costs(listing, old, update_data, now)
+
+    # A type the scraper read from the card fills a missing/'other' type only;
+    # it never overwrites a type the engine or an earlier run already settled.
+    new_ptype = listing.get('property_type')
+    if new_ptype and new_ptype != 'other' and (old.get('property_type') or 'other') == 'other':
+        update_data['property_type'] = new_ptype
 
     new_status = listing.get('price_status')
     if new_status and new_status != 'unknown':

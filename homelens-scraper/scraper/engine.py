@@ -229,19 +229,7 @@ BLENDED_CONFIDENCE   = 'low_blended'  # frontend badge: limited local data
 
 # ── Property type classification ──────────────────────────────────────────────
 
-_PROPERTY_RULES: list[tuple[str, list[str]]] = [
-    ('apartment', ['apartment', 'flat', 'penthouse', 'studio']),
-    ('townhouse', ['townhouse', 'duplex', 'triplex']),   # must come before 'house'
-    ('house',     ['house', 'freehold', 'villa', 'cottage']),
-]
-
-
-def _classify_property_type(title: str) -> str:
-    t = (title or '').lower()
-    for ptype, keywords in _PROPERTY_RULES:
-        if any(kw in t for kw in keywords):
-            return ptype
-    return 'other'
+from .property_types import classify_property_type as _classify_property_type  # noqa: E402
 
 
 # ── Robust statistics (v4.1) ─────────────────────────────────────────────────
