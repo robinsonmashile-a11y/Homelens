@@ -463,6 +463,15 @@ def run_suburb_fix() -> None:
         .is_('price', 'null')
         .not_.is_('price_at_first', 'null')
     )
+    # Sold / under-offer listings are not available to buy, so they must not
+    # feed price baselines: deactivate them. Scrapers set is_active=True on every
+    # sighting, so this must run after each scrape (listing_status stays set).
+    not_live = _paged(
+        supabase.table('listings')
+        .select('listing_id')
+        .eq('is_active', True)
+        .in_('listing_status', ['under_offer', 'sold'])
+    )
     commercial = _paged(
         supabase.table('listings')
         .select('listing_id')
@@ -490,6 +499,7 @@ def run_suburb_fix() -> None:
     inactive_listings = inactive_null.data + inactive_empty.data
     no_price_ids      = list({r['listing_id'] for r in no_price_null.data + no_price_zero.data})
     commercial_ids    = [r['listing_id'] for r in commercial.data]
+    not_live_ids      = [r['listing_id'] for r in not_live.data]
     price_gone        = price_gone_result.data
     good_but_inactive_ids = [r['listing_id'] for r in good_but_inactive_result.data]
     # Only inactive RENTALS become reference evidence (the rent model is rental-
@@ -561,6 +571,8 @@ def run_suburb_fix() -> None:
     deactivated_no_price = _bulk_update(supabase, no_price_ids,   {'is_active': False})
     deactivated_commercial = _bulk_update(supabase, commercial_ids, {'is_active': False})
 
+    deactivated_not_live = _bulk_update(supabase, not_live_ids, {'is_active': False})
+
     price_gone_ids = [r['listing_id'] for r in price_gone if r.get('listing_id')]
     deactivated_price_gone = _bulk_update(supabase, price_gone_ids, {'is_active': False})
 
@@ -597,6 +609,7 @@ def run_suburb_fix() -> None:
     print(f'Deactivated (no suburb): {deactivated}')
     print(f'Deactivated (no price):  {deactivated_no_price}')
     print(f'Deactivated (commercial):{deactivated_commercial}')
+    print(f'Deactivated (sold/under offer):{deactivated_not_live}')
     print(f'Deactivated (price gone):{deactivated_price_gone}  (had price_at_first, now price=NULL)')
     print(f'Skipped:                 {skipped}')
     print(f'Total processed:         {len(active_listings) + len(inactive_listings)}')
