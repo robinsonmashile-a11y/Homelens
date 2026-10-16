@@ -89,3 +89,34 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           HOMELENS_CITIES: ${{ matrix.cities }}
         run: python scripts/run_all_scrapers.py --only ${{ matrix.scraper }}
+
+  # Runs once, after every scraper job has finished (pass or fail). Scrapers set
+  # is_active=true on every sighting, so this re-applies the rules that keep
+  # listings out of the baselines: no suburb / no price / commercial / sold /
+  # under offer. Cape Town only (see scripts/fix_suburbs.py).
+  fix-suburbs:
+    needs: scrape
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: fix suburbs
+    defaults:
+      run:
+        working-directory: homelens-scraper
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: homelens-scraper/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fix_suburbs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/fix_suburbs.py
