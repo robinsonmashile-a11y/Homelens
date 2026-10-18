@@ -634,7 +634,9 @@ def compute_investment_row(
     }
     if str_stats:
         sp = str_potential(str_stats, suburb, listing.get('bedrooms'),
-                           net_rental_income)
+                           net_rental_income,
+                           size_m2=listing.get('size_m2'),
+                           property_type=listing.get('property_type'))
         if sp:
             str_fields.update(sp)
 
@@ -808,7 +810,7 @@ def fetch_sale_listings(client, listing_ids: list[str]) -> list[dict]:
         resp  = (
             client.table('listings')
             .select('listing_id,suburb_normalised,listing_type,price,'
-                    'bedrooms,property_type,is_active')
+                    'bedrooms,property_type,is_active,size_m2')
             .in_('listing_id', batch)
             .eq('listing_type', 'sale')
             .eq('is_active', True)
@@ -969,20 +971,41 @@ def _str_net(gross: float) -> int:
     return round(gross - mgmt - STR_CLEANING_PER_MO - STR_UTILITIES_PER_MO)
 
 
+STR_STUDIO_FACTOR = 0.75   # a studio earns ~75% of a 1-bedroom (no AirDNA studio series)
+STR_STUDIO_MAX_M2 = 35     # no bedroom count: a flat this small is treated as a studio
+STR_ONE_BED_MAX_M2 = 75    # ...up to this size as a 1-bedroom
+
+
 def str_potential(str_stats: dict, suburb: str, bedrooms,
-                  lt_net_monthly: float | None) -> dict | None:
+                  lt_net_monthly: float | None,
+                  size_m2=None, property_type: str | None = None) -> dict | None:
     """
     Look up short-term potential for a listing and compare to long-term NET.
     Returns a dict for the STR panel, or None when no STR data for this
     suburb+bed (Option B honesty — no fabrication elsewhere).
+
+    AirDNA has no studio series, and some listings carry no bedroom count, so
+    two estimates are allowed, both marked str_confidence = 'estimated':
+      * 0 bedrooms             -> 1-bedroom revenue x STR_STUDIO_FACTOR
+      * no bedrooms, apartment -> by size: <= STR_STUDIO_MAX_M2 studio,
+                                  <= STR_ONE_BED_MAX_M2 1-bedroom
     """
     bed = str(int(bedrooms)) if bedrooms not in (None, '') else None
+    factor, estimated = 1.0, False
+    if bed is None and property_type == 'apartment' and size_m2:
+        if size_m2 <= STR_STUDIO_MAX_M2:
+            bed, factor, estimated = '0', STR_STUDIO_FACTOR, True
+        elif size_m2 <= STR_ONE_BED_MAX_M2:
+            bed, estimated = '1', True
     if bed is None:
         return None
-    hit = str_stats.get((suburb, bed))
+    lookup_bed = bed
+    if bed == '0':
+        lookup_bed, factor, estimated = '1', STR_STUDIO_FACTOR, True
+    hit = str_stats.get((suburb, lookup_bed))
     if not hit:
         return None
-    gross = hit['gross']
+    gross = hit['gross'] * factor
     net   = _str_net(gross)
     better = False
     vs_lt = None
@@ -995,7 +1018,7 @@ def str_potential(str_stats: dict, suburb: str, bedrooms,
         'str_vs_lt_pct':      vs_lt,
         'str_better_value':   better,
         'str_data_available': True,
-        'str_confidence':     hit['confidence'],
+        'str_confidence':     'estimated' if estimated else hit['confidence'],
     }
 
 
