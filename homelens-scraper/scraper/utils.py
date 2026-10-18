@@ -275,3 +275,26 @@ def extract_listing_id_from_url(url: str) -> str | None:
         return m.group(1).upper()
     # Fallback: deterministic hash of the URL
     return 'h' + hashlib.md5(url.encode()).hexdigest()[:12]
+
+
+async def goto_with_retry(page, url: str, *, wait_until: str = 'domcontentloaded',
+                          timeout: int = 60_000, attempts: int = 3) -> None:
+    """
+    page.goto with retries. A single slow load used to drop a whole results
+    page (page 1 = the entire listing type for that city, for the whole run).
+    Waits 5s then 15s between attempts; raises the last error if all fail.
+    """
+    import asyncio
+    import logging
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            await page.goto(url, wait_until=wait_until, timeout=timeout)
+            return
+        except Exception as e:                        # Playwright TimeoutError etc.
+            last = e
+            if i < attempts - 1:
+                logging.getLogger('homelens.utils').warning(
+                    'goto %s failed (attempt %d/%d): %s', url, i + 1, attempts, e)
+                await asyncio.sleep(5 * (3 ** i))
+    raise last  # type: ignore[misc]

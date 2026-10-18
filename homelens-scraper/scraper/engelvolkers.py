@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from scraper.utils import goto_with_retry
 import re
 from typing import AsyncGenerator
 
@@ -260,7 +261,7 @@ async def _fetch_listings(
         # Load page 1
         url = _page_url(base_url, 1)
         logger.info('  [%s] Loading page 1: %s', lt_name, url)
-        await page.goto(url, wait_until='domcontentloaded', timeout=60_000)
+        await goto_with_retry(page, url, wait_until='domcontentloaded', timeout=60_000)
         await asyncio.sleep(PAGE_LOAD_WAIT)
 
         # Dismiss consent wall on first load only

@@ -21,3 +21,11 @@ def test_classify(text, expected):
 def test_looks_non_residential():
     assert looks_non_residential('7,633m² Farm For Sale')
     assert not looks_non_residential('SAGEWOOD')
+
+
+def test_validate_listing_nulls_overflow_price():
+    from scraper.database import validate_listing
+    out = validate_listing({'listing_id': 'x', 'price': 2_999_999_999, 'price_per_m2': 5})
+    assert out['price'] is None and out['price_status'] == 'extraction_failed'
+    ok = validate_listing({'listing_id': 'y', 'price': 5_000_000})
+    assert ok['price'] == 5_000_000

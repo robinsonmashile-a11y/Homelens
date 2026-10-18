@@ -24,6 +24,9 @@ _SIZE_CAPS: dict[str, float] = {
 _IMAGE_BLOCKLIST = ('logo', 'placeholder', 'default', 'avatar', 'icon', 'blank')
 
 
+_MAX_PRICE = 2_000_000_000   # below the 2,147,483,647 integer ceiling
+
+
 def validate_listing(listing: dict) -> dict:
     """
     Apply data-quality rules to a listing dict before upsert.
@@ -39,6 +42,14 @@ def validate_listing(listing: dict) -> dict:
     """
     # Scrapers that only cover Cape Town (duarte, gumtree) don't set a city.
     listing.setdefault('city', 'cape-town')
+
+    # price is an integer column: a 10-digit placeholder ("2999999999") crashes the write.
+    if (listing.get('price') or 0) > _MAX_PRICE:
+        logger.warning('validate_listing: %s price %s above R%s — nulled',
+                       listing.get('listing_id', '?'), listing['price'], _MAX_PRICE)
+        listing['price'] = None
+        listing['price_per_m2'] = None
+        listing['price_status'] = 'extraction_failed'
 
     ptype  = (listing.get('property_type') or '').lower()
     size   = listing.get('size_m2')
@@ -238,6 +249,18 @@ def upsert_listing_by_url(listing: dict) -> str:
         .eq('listing_url', listing['listing_url'])
         .execute()
     )
+    url_changed = False
+    if not existing.data and listing.get('listing_id'):
+        # Same listing under a new URL (agent re-slugged it): without this the
+        # insert below hits the listing_id primary key and the listing is never
+        # refreshed or re-activated.
+        existing = (
+            client.table('listings')
+            .select('listing_id, price, price_history, first_seen, listing_status, property_type')
+            .eq('listing_id', listing['listing_id'])
+            .execute()
+        )
+        url_changed = bool(existing.data)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -262,6 +285,9 @@ def upsert_listing_by_url(listing: dict) -> str:
         'updated_at':      now,
         'last_scraped_at': now,
     }
+
+    if url_changed:
+        update_data['listing_url'] = listing['listing_url']
 
     # Always propagate image_url if the scraper found one
     if listing.get('image_url'):

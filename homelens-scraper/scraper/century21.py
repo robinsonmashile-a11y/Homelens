@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from scraper.utils import goto_with_retry
 import re
 from typing import AsyncGenerator
 from urllib.parse import urlparse
@@ -179,7 +180,7 @@ async def _fetch_page_cards(
     page = await context.new_page()
     try:
         logger.info('  [%s] Scraping page %d → %s', lt_name, page_num, url)
-        await page.goto(url, wait_until='networkidle', timeout=60_000)
+        await goto_with_retry(page, url, wait_until='networkidle', timeout=60_000)
         await asyncio.sleep(PAGE_LOAD_WAIT)
         await _scroll_to_load_all(page)
 
