@@ -42,11 +42,13 @@ MIGRATION SQL — run ONCE in Supabase SQL editor before first run:
 """
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -350,6 +352,97 @@ def _deal_badge(gap_pct: float | None) -> str | None:
     if gap_pct <   BADGE_GOOD:      return 'fair'
     if gap_pct <   BADGE_OVERPRICED: return 'above_market'
     return 'overpriced'
+
+
+# ── Hand-approved rescues ─────────────────────────────────────────────────────
+# Listings the engine cannot score (their own bedroom/type group is too thin)
+# but that were reviewed and approved in data/approved_judgements.json. Each is
+# scored against its whole suburb + property-type pool (all bedroom counts,
+# the listing itself excluded) and given the blended-baseline guardrails:
+# compressed score (ceiling 50), hedged label, no extreme verdict, confidence
+# 'low_blended'. They never feed baselines — baselines are built before this.
+
+APPROVED_JUDGEMENTS_PATH = Path(__file__).resolve().parent.parent / 'data' / 'approved_judgements.json'
+RESCUE_MIN_POOL = 6
+
+
+def _load_approved_ids() -> list[str]:
+    try:
+        data = json.loads(APPROVED_JUDGEMENTS_PATH.read_text())
+        return [a['listing_id'] for a in data.get('approved', []) if a.get('listing_id')]
+    except FileNotFoundError:
+        return []
+    except Exception as e:                      # a bad file must never break the engine
+        logger.warning('approved_judgements.json unreadable: %s', e)
+        return []
+
+
+def build_rescue_signal_rows(rows: list[dict], scored_ids: set[str],
+                             approved_ids: list[str], attract_map: dict,
+                             now: str) -> list[dict]:
+    """Signal rows for approved listings that the normal pass did not score."""
+    by_id = {r['listing_id']: r for r in rows}
+    out: list[dict] = []
+    for lid in approved_ids:
+        listing = by_id.get(lid)
+        if listing is None or lid in scored_ids:
+            continue                              # inactive, outlier, or already scored
+        try:
+            if listing.get('listing_type') != 'sale' or not listing.get('price'):
+                continue
+            suburb, ptype = listing.get('suburb_normalised'), listing.get('property_type')
+            peers = [r for r in rows if r['listing_id'] != lid
+                     and r.get('listing_type') == 'sale'
+                     and r.get('suburb_normalised') == suburb
+                     and r.get('property_type') == ptype]
+            price, size, pm2 = listing['price'], listing.get('size_m2'), listing.get('price_per_m2')
+            pm2_pool = [r['price_per_m2'] for r in peers
+                        if r.get('price_per_m2') and (r.get('size_m2') or 0) > SIZE_MIN]
+            if pm2 and size and size > SIZE_MIN and len(pm2_pool) >= RESCUE_MIN_POOL:
+                method, value, pool = 'price_per_m2', pm2, pm2_pool
+            else:
+                method, value = 'price_only', price
+                pool = [r['price'] for r in peers if r.get('price')]
+                if len(pool) < RESCUE_MIN_POOL:
+                    continue
+            med = statistics.median(pool)
+            mad = _mad(pool)
+            z = _robust_z(value, med, mad)
+            if z is None:
+                continue
+            gap_pct = round((value - med) / med * 100, 1)
+            gap_rands = int(price - round(med * size)) if method == 'price_per_m2' else int(price - med)
+            raw = _raw_score_from_z(z)
+            price_score = _blended_final_score(raw)
+            attract = attract_map.get(suburb, 50)
+            score = min(round(price_score * 0.65 + attract * 0.35), 55)
+            verdict, label = _cap_blended_verdict(*_verdict_from_z(z))
+            out.append({
+                'listing_id': lid, 'suburb_normalised': suburb,
+                'listing_type': 'sale', 'bedrooms': listing.get('bedrooms'),
+                'property_type': ptype, 'comparison_method': method,
+                'listing_price_per_m2': pm2,
+                'median_price_per_m2': med if method == 'price_per_m2' else None,
+                'std_dev_price_per_m2': None,
+                'mad_price_per_m2': mad if method == 'price_per_m2' else None,
+                'listing_price': int(price),
+                'median_price': med if method == 'price_only' else None,
+                'std_dev_price': None,
+                'mad_price': mad if method == 'price_only' else None,
+                'z_score': z, 'gap_pct': gap_pct, 'gap_rands': gap_rands,
+                'gap_annual': gap_rands * 12, 'raw_score': raw,
+                'sample_size_ceiling': BLENDED_SCORE_CEILING,
+                'attractiveness_score': attract, 'final_price_score': price_score,
+                'homelens_score': score, 'verdict': verdict, 'verdict_label': label,
+                'deal_badge': _deal_badge(gap_pct), 'confidence': BLENDED_CONFIDENCE,
+                'sample_size': len(pool), 'market_consistency': None,
+                'is_luxury': False, 'is_outlier': False,
+                'baseline_method': 'blended', 'parent_sample_size': len(pool),
+                'blend_weight': 0.0, 'computed_at': now,
+            })
+        except Exception as e:
+            logger.warning('Rescue signal error (%s): %s', lid, e)
+    return out
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -1058,6 +1151,13 @@ def compute_listing_signals(
 
         except Exception as e:
             logger.warning('Signal error (%s): %s', listing.get('listing_id'), e)
+
+    # ── Hand-approved rescues (data/approved_judgements.json) ────────────────
+    rescue_rows = build_rescue_signal_rows(
+        rows, {r['listing_id'] for r in signal_rows}, _load_approved_ids(), attract_map, now)
+    if rescue_rows:
+        logger.info('  %d hand-approved listings scored against their suburb pool', len(rescue_rows))
+        signal_rows.extend(rescue_rows)
 
     # ── Batch upsert ──────────────────────────────────────────────────────────
     upserted   = 0

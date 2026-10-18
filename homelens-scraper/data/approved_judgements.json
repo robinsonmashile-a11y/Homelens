@@ -1,0 +1,8 @@
+{
+  "_about": "Listings the engine could not score (too few comparables) that were reviewed by hand and approved to be shown. The engine scores each one against its whole suburb + property-type pool and gives it the same guarded low-confidence treatment as blended baselines (score ceiling 50, hedged labels, no extreme verdict). Remove an entry to stop showing it.",
+  "approved": [
+    {"listing_id": "chaseveritt_2568925", "note": "Bantry Bay 0.5-bed 41 m2, R1,995,000. Prime address entry price; approved 2026-10-18."},
+    {"listing_id": "tyson_3484156", "note": "Woodstock apartment 53 m2, R1,199,000, 40% below price/m2 median (n=83); approved 2026-10-18."},
+    {"listing_id": "tyson_3092679", "note": "Woodstock apartment 51 m2, R1,299,000, 32% below price/m2 median (n=83); approved 2026-10-18."}
+  ]
+}
