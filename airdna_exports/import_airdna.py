@@ -53,6 +53,7 @@ SUBURB_ALIASES = {
     'vredehoek':   'vredehoek',
     'woodstock':   'woodstock',
     'gardens':     'gardens',
+    'bantrybay':   'bantry-bay',
 }
 
 BEDROOM_COLUMNS = {
@@ -86,7 +87,7 @@ def _suburb_from_filename(path: str) -> str | None:
     last underscore-separated token before .csv as a fallback.
     """
     name = os.path.basename(path).rsplit('.', 1)[0].lower()
-    m = re.search(r'last_\d+_years?_(.+)$', name)
+    m = re.search(r'last_\d+_years?_?(.+)$', name)
     suffix = m.group(1) if m else name.split('_')[-1]
     return SUBURB_ALIASES.get(suffix, suffix)
 
@@ -178,15 +179,18 @@ def upload(rows: list[dict]) -> None:
     client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
     # normalise blank daily rate to None for the DB
     payload = [{**r, 'avg_daily_rate': (r['avg_daily_rate'] or None)} for r in rows]
+    # The table has no unique constraint on the natural key, so upsert is not
+    # available: replace each uploaded suburb's airdna rows (delete, then insert).
+    for sub in sorted({r['suburb_normalised'] for r in payload}):
+        client.table('str_market_stats').delete() \
+            .eq('suburb_normalised', sub).eq('source', 'airdna').execute()
     up = 0
     for i in range(0, len(payload), 500):
         chunk = payload[i:i + 500]
-        # upsert on the natural key so re-imports don't duplicate
-        client.table('str_market_stats').upsert(
-            chunk, on_conflict='suburb_normalised,month,bedroom_count,source'
-        ).execute()
+        client.table('str_market_stats').insert(chunk).execute()
         up += len(chunk)
-    logger.info('Upserted %d rows into str_market_stats', up)
+    logger.info('Inserted %d rows into str_market_stats (suburbs replaced: %s)', up,
+                ', '.join(sorted({r["suburb_normalised"] for r in payload})))
 
 
 def main() -> None:
@@ -194,11 +198,16 @@ def main() -> None:
     ap.add_argument('--dir', required=True, help='folder of AirDNA CSV exports')
     ap.add_argument('--out', default='str_market_stats_import.csv',
                     help='output CSV path (default: str_market_stats_import.csv)')
+    ap.add_argument('--only', default='',
+                    help='comma-separated suburb_normalised values; only these are written/uploaded')
     ap.add_argument('--upload', action='store_true',
                     help='also upsert into Supabase str_market_stats')
     args = ap.parse_args()
 
     rows = build_rows(args.dir)
+    only = {x.strip() for x in args.only.split(',') if x.strip()}
+    if only:
+        rows = [r for r in rows if r['suburb_normalised'] in only]
     if not rows:
         sys.exit(1)
     write_csv(rows, args.out)
