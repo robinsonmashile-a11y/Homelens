@@ -55,6 +55,7 @@ from scraper.utils import (
 )
 from scraper.cities import CITIES
 from scraper.enrich import costs_from_texts, resolve_status
+from scraper.detail import parse_detail_fields
 from scraper.extractors import cost_in_bounds, parse_money
 
 logger = logging.getLogger('homelens.exprealty')
@@ -429,6 +430,11 @@ def _map_record(record: dict, listing_type: str, city_slug: str = 'cape-town') -
 
     price_per_m2 = compute_price_per_m2(price, size_m2)
 
+    extras = _read_detail_extras(record, description)
+    if size_m2 is None and extras['size_m2'] is not None:
+        size_m2 = extras['size_m2']
+        price_per_m2 = compute_price_per_m2(price, size_m2)
+
     listing_status, status_source = _read_status(record, title, description)
     costs = _read_costs(record, description) if listing_type == 'sale' else {}
 
@@ -447,7 +453,7 @@ def _map_record(record: dict, listing_type: str, city_slug: str = 'cape-town') -
         'source':            'exprealty',
         'listing_type':      listing_type,
         'title':             clean_personal_info(title[:250]) if title else None,
-        'description':       clean_personal_info(description[:1000]) if description else None,
+        'description':       clean_personal_info(description[:5000]) if description else None,
         'price':             price,
         'price_status':      price_status,
         'bedrooms':          bedrooms,
@@ -460,7 +466,40 @@ def _map_record(record: dict, listing_type: str, city_slug: str = 'cape-town') -
         'listing_status':    listing_status,
         'status_source':     status_source,
         **costs,
+        **{k: extras[k] for k in _EXTRA_KEYS if extras[k] is not None},
+        'details_checked_at': datetime.now(timezone.utc).isoformat(),
     }
+
+
+_EXTRA_KEYS = ('parking', 'erf_size', 'is_furnished', 'building_name', 'security',
+               'views', 'levy_includes', 'pet_friendly')
+
+
+def _read_detail_extras(record: dict, description: str) -> dict:
+    """
+    Parking / erf / furnished / security / views … from the API record's own
+    fields (plot_size_sqm, garage, parking_info, amenities) and the description.
+    Anything the record doesn't state stays None.
+    """
+    amenities = record.get('amenities') or []
+    if isinstance(amenities, str):
+        amenities = [a.strip() for a in re.split(r'[,;|]', amenities) if a.strip()]
+    fields = parse_detail_fields([], {'amenities': [str(a) for a in amenities]}, description, description)
+
+    plot = _parse_size(record.get('plot_size_sqm'))
+    if plot:
+        fields['erf_size'] = plot
+
+    for key in ('garage', 'parking_info'):
+        raw = record.get(key)
+        try:
+            n = int(float(raw))
+        except (TypeError, ValueError):
+            n = None
+        if n and n > 0:
+            fields['parking'] = n
+            break
+    return fields
 
 
 def _read_status(record: dict, title: str, description: str) -> tuple[str, str]:

@@ -58,10 +58,22 @@ class StubPage:
         self.visited.append(url)
 
 
-def make_enricher(monkeypatch, checked=(), fail_on=None, costs=None):
+DETAIL = {'description': 'A bright two-bedroom apartment close to the beach and shops.',
+          'size_m2': 79.0, 'bedrooms': 2, 'bathrooms': 1.0, 'parking': 1, 'levy_monthly': None,
+          'rates_monthly': None, 'levy_includes': None, 'erf_size': None, 'building_name': None,
+          'pet_friendly': None, 'is_furnished': None, 'security': None, 'views': None}
+
+
+def make_enricher(monkeypatch, checked=(), fail_on=None, costs=None, details_checked=()):
     e = CostEnricher('greeff', owner=None, selectors={})
     e.page = StubPage()
     e.checked = set(checked)
+    e.details_checked = set(details_checked)
+
+    async def fake_detail(page, sel):
+        return dict(DETAIL)
+
+    monkeypatch.setattr(enrich, 'read_detail_from_page', fake_detail)
 
     async def fake_read(page, sel):
         if fail_on and page.visited[-1] == fail_on:
@@ -90,16 +102,31 @@ def test_new_sale_listing_is_visited_and_gets_costs(monkeypatch):
     assert out['costs_checked_at']
 
 
-def test_rentals_are_never_visited_for_costs(monkeypatch):
+def test_rentals_are_visited_for_details_but_never_get_costs(monkeypatch):
     e = make_enricher(monkeypatch)
     out = asyncio.run(e.enrich(listing(listing_type='rent')))
-    assert e.page.visited == [] and 'levy_monthly' not in out
+    assert e.page.visited == ['https://x/1']
+    assert 'levy_monthly' not in out and 'costs_checked_at' not in out
+    assert out['description'] and out['size_m2'] == 79.0 and out['details_checked_at']
 
 
-def test_recently_checked_listing_is_skipped(monkeypatch):
+def test_listing_with_recent_costs_and_details_is_skipped(monkeypatch):
+    e = make_enricher(monkeypatch, checked={'a1'}, details_checked={'a1'})
+    out = asyncio.run(e.enrich(listing()))
+    assert e.page.visited == [] and 'levy_monthly' not in out and 'description' not in out
+
+
+def test_costs_checked_but_details_missing_still_visits_for_details_only(monkeypatch):
     e = make_enricher(monkeypatch, checked={'a1'})
     out = asyncio.run(e.enrich(listing()))
-    assert e.page.visited == [] and 'levy_monthly' not in out
+    assert e.page.visited == ['https://x/1']
+    assert 'costs_checked_at' not in out and out['description']
+
+
+def test_card_values_are_kept_over_detail_page_values(monkeypatch):
+    e = make_enricher(monkeypatch)
+    out = asyncio.run(e.enrich(listing(size_m2=60.0, bedrooms=3)))
+    assert out['size_m2'] == 60.0 and out['bedrooms'] == 3 and out['bathrooms'] == 1.0
 
 
 def test_failed_visit_is_not_marked_checked_so_it_is_retried(monkeypatch):
@@ -158,7 +185,9 @@ def test_exp_levy_typed_at_the_end_of_a_long_description_is_found():
     rec['description'] = 'Lovely home. ' * 120 + 'Levies: R2 267 pm, Rates: R1 000 pm'
     out = exprealty._map_record(rec, 'sale')
     assert (out['levy_monthly'], out['rates_monthly']) == (2267.0, 1000.0)
-    assert len(out['description']) == 1000            # stored description is still cut
+    assert len(out['description']) == 1595            # the full description is stored (cap is 5000)
+    rec['description'] = 'x' * 6000
+    assert len(exprealty._map_record(rec, 'sale')['description']) == 5000
 
 
 def test_exp_rentals_get_no_costs():

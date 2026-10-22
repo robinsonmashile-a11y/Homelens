@@ -25,6 +25,7 @@ from playwright.async_api import (
 )
 
 from .utils import clean_personal_info, normalise_price, parse_price, normalise_suburb, validate_image_url
+from .detail_page import apply_details, read_detail_from_page
 from .enrich import apply_costs, costs_from_texts, read_card_status
 from .extractors import cost_in_bounds
 
@@ -334,14 +335,21 @@ async def _extract_detail(page: Page, listing_type: str) -> dict:
         # RE/MAX pages contain both "floor_area" and "land_area" in a JSON blob.
         # We ONLY use floor_area; land_area (ERF/plot size) is never used.
         page_html = await page.content()
-        floor_m = re.search(r'"floor_area"\s*:\s*(\d+(?:\.\d+)?)', page_html)
-        if floor_m:
-            try:
-                val = float(floor_m.group(1))
-                if 15 <= val <= 2000:
-                    detail['size_m2'] = val
-            except ValueError:
-                pass
+        # The payload is embedded as an escaped JSON string (\"floor_area\":88), so the
+        # quotes are optionally preceded by a backslash.
+        def _payload_num(key: str) -> float | None:
+            m = re.search(r'\\?"' + key + r'\\?"\s*:\s*(\d+(?:\.\d+)?)', page_html)
+            return float(m.group(1)) if m else None
+
+        floor = _payload_num('floor_area')
+        if floor and 15 <= floor <= 2000:
+            detail['size_m2'] = floor
+        land = _payload_num('land_area')
+        if land and land > 0:
+            detail['erf_size'] = land
+        garages = _payload_num('garages')
+        if garages and garages > 0:
+            detail['parking'] = int(garages)
 
         # Solar / garden / parking keywords in full page text
         page_text = await page.evaluate('() => document.body.innerText')
@@ -358,6 +366,14 @@ async def _extract_detail(page: Page, listing_type: str) -> dict:
         # loaded for every listing, so there is no extra visit.
         if listing_type == 'sale':
             apply_costs(detail, _read_costs(page_html, page_text, detail.get('description')))
+
+        # Shared reader: pets / furnished / security / views / levy_includes from the
+        # description and any label rows. Payload values read above win.
+        fields = await read_detail_from_page(page, SELECTORS)
+        for key in ('size_m2', 'erf_size', 'parking'):
+            if detail.get(key) is not None:
+                fields[key] = detail[key]
+        apply_details(detail, {k: v for k, v in fields.items() if k != 'description'})
 
         # Image — og:image is an HTML meta tag, available even when image requests are aborted
         raw_image = await page.evaluate('''() => {

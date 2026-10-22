@@ -482,6 +482,13 @@ async def main() -> None:
     except Exception as e:
         logger.warning('Could not build status/costs report: %s', e)
 
+    # ── New listings since this run started (read-only) ───────────────────
+    try:
+        from scraper.reports import new_listings_report
+        new_listings_report(since=datetime.fromisoformat(run_started_at))
+    except Exception as e:
+        logger.warning('Could not build new-listings report: %s', e)
+
     print(f'  Run ID : {run_id}')
     print('  (Audit rows written to scrape_audit_log)')
     print()

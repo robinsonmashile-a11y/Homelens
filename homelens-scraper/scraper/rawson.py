@@ -36,6 +36,8 @@ from scraper.utils import (
     validate_image_url,
 )
 from scraper.cities import CITIES, city_index, city_url
+from scraper.detail import DETAIL_FIELDS, LOG_EXPECTED, log_missing
+from scraper.detail_page import apply_details, read_detail_from_page
 from scraper.enrich import apply_costs, read_card_status, read_costs_from_page
 
 logger = logging.getLogger('homelens.rawson')
@@ -331,6 +333,7 @@ async def _fetch_detail(browser: Browser, url: str) -> dict:
         'has_parking': False,
         'has_garden':  False,
         'image_url':   None,
+        'fields':      None,
     }
 
     context = await _new_context(browser)
@@ -393,8 +396,10 @@ async def _fetch_detail(browser: Browser, url: str) -> dict:
 
         # ── Monthly levy / rates (site rows first, then text fallback) ──────
         costs = await read_costs_from_page(page, SELECTORS)
+        fields = await read_detail_from_page(page, SELECTORS)
 
         return {
+            'fields':      fields,
             'size_m2':     size_m2,
             'description': description,
             'has_parking': has_parking,
@@ -534,6 +539,13 @@ async def _run_rawson_city(city: dict) -> AsyncGenerator[dict, None]:
                         card['description'] = (
                             clean_personal_info(synopsis[:2000]) if synopsis else None
                         )
+
+                    # Shared detail reader: erf, parking count, furnished, security,
+                    # views … (keeps the size/description read above when present)
+                    if detail.get('fields'):
+                        apply_details(card, detail['fields'])
+                        log_missing('rawson', card['listing_id'],
+                                    {k: card.get(k) for k in DETAIL_FIELDS}, expected=LOG_EXPECTED)
 
                     # Compute price_per_m2 if we have both
                     if card['size_m2'] and card['price']:
