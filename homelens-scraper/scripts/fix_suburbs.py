@@ -20,7 +20,10 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scraper.cities import CITIES as _SCRAPER_CITIES  # noqa: E402
 from scraper.property_types import looks_non_residential  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from suburbs_johannesburg import suburb_names as _jhb_suburb_names  # noqa: E402
 
 # ── Step 1: Cape Town suburb dictionary ──────────────────────────────────────
 
@@ -341,8 +344,15 @@ _PATTERNS = [
 ]
 
 
-def find_suburb_in_text(text: str) -> str | None:
-    """Return a suburb slug for *text*, or None if no CT suburb is found."""
+def find_suburb_in_text(text: str, city: str = 'cape-town') -> str | None:
+    """
+    Return a suburb slug for *text* using ONLY *city*'s dictionary, or None.
+    A listing is never matched against another city's suburbs.
+    """
+    if city == 'johannesburg':
+        return _find_johannesburg_suburb(text)
+    if city != 'cape-town':
+        return None                                  # unknown city: do not guess
     if not text:
         return None
 
@@ -364,6 +374,34 @@ def find_suburb_in_text(text: str) -> str | None:
     return None
 
 
+# ── Johannesburg ──────────────────────────────────────────────────────────────
+# Whole-word matching (a short name must not match inside another word), longest
+# name first so "bryanston east" beats "bryanston".
+_JHB_NAMES = _jhb_suburb_names()
+_JHB_PATTERNS = [
+    (re.compile(r'(?<![a-z])' + re.escape(name) + r'(?![a-z])'), slug)
+    for name, slug in sorted(_JHB_NAMES.items(), key=lambda kv: len(kv[0]), reverse=True)
+]
+_EXT_RE = re.compile(r"([a-z][a-z' ]*?)\s+ext(?:ension)?\.?\s*(\d+)")
+
+
+def _find_johannesburg_suburb(text: str) -> str | None:
+    if not text:
+        return None
+    t = re.sub(r'[\u2013\u2014,]', ' ', text.lower())
+    t = re.sub(r'\s+', ' ', t).strip()
+    # "Lenasia Ext 10" -> lenasia-ext-10 (the scrapers' own slug form), if the base suburb is known
+    m = _EXT_RE.search(t)
+    if m:
+        base = _JHB_NAMES.get(m.group(1).strip().split(' in ')[-1].strip())
+        if base:
+            return f'{base}-ext-{m.group(2)}'
+    for pattern, slug in _JHB_PATTERNS:
+        if pattern.search(t):
+            return slug
+    return None
+
+
 # ── Step 3: Main script ───────────────────────────────────────────────────────
 
 # Studios / bachelor flats / "0.5 bedroom" listings arrive with bedrooms
@@ -381,9 +419,34 @@ def is_studio(title: str | None) -> bool:
     return bool(title and _STUDIO_RE.search(title))
 
 
-# Only Cape Town has a suburb dictionary (and the engine / investment model are
-# Cape Town only), so this script must not touch other cities' listings.
-CITY = 'cape-town'
+# Each city is processed on its own, with its own suburb dictionary. Nothing is
+# ever matched across cities. (Cape Town is unchanged from before.)
+CITY = 'cape-town'                                 # default / original behaviour
+CITIES = ('cape-town', 'johannesburg')
+
+# Cape Town: a title match may RE-label a suburb, and a listing that still has no
+# suburb is deactivated (it cannot be scored). Johannesburg is stricter: a suburb
+# the scraper already set from the site's own URL is never overwritten, and an
+# unresolved listing is left active and reported, not hidden.
+CITY_POLICY = {
+    'cape-town':    {'overwrite_suburb': True,  'deactivate_unresolved': True},
+    'johannesburg': {'overwrite_suburb': False, 'deactivate_unresolved': False},
+}
+
+# Sites whose URLs carry the town: /results/residential/for-sale/<town>/...
+# A listing whose town is not its city's town was tagged with the wrong city.
+_PLATFORM_SOURCES = {'greeff', 'sothebys', 'tyson', 'seeff', 'jawitz', 'century21',
+                     'chaseveritt', 'harcourts', 'justproperty', 'dgproperties', 'lionlead'}
+_TOWN_RE = re.compile(r'/(?:for-sale|to-let|for-rent)/([a-z0-9\-]+)/')
+_CITY_TOWN = {c['slug']: c['platform_path'] for c in _SCRAPER_CITIES}
+
+
+def wrong_city(listing: dict, city: str) -> bool:
+    """True when a platform listing's URL town is not the town of the city it is tagged with."""
+    if (listing.get('source') or '') not in _PLATFORM_SOURCES:
+        return False
+    m = _TOWN_RE.search(listing.get('listing_url') or '')
+    return bool(m) and m.group(1) != _CITY_TOWN.get(city)
 
 
 class _Rows:
@@ -391,14 +454,14 @@ class _Rows:
         self.data = data
 
 
-def _paged(query, page_size: int = 1000) -> _Rows:
-    """Run a select for CITY across all pages. (.limit(20000) is silently capped
+def _paged(query, city: str = CITY, page_size: int = 1000) -> _Rows:
+    """Run a select for *city* across all pages. (.limit(20000) is silently capped
     at 1000 rows by PostgREST, which made this script process a random slice.)"""
     rows: list[dict] = []
     offset = 0
     while True:
         chunk = (
-            query.eq('city', CITY)
+            query.eq('city', city)
             .order('listing_id')
             .range(offset, offset + page_size - 1)
             .execute()
@@ -420,49 +483,57 @@ def _bulk_update(supabase, ids: list[str], payload: dict, batch_size: int = 200)
     return total
 
 
-def run_suburb_fix() -> None:
+def run_suburb_fix(cities: tuple[str, ...] = CITIES) -> None:
     load_dotenv()
     supabase = create_client(
         os.environ['SUPABASE_URL'],
         os.environ['SUPABASE_KEY'],
     )
+    for city in cities:
+        _run_city(supabase, city)
 
-    print('=== SUBURB FIX STARTING ===\n')
+
+def _run_city(supabase, city: str) -> None:
+    """One city, start to finish. Every query is scoped to *city*."""
+    policy = CITY_POLICY[city]
+    paged = lambda query: _paged(query, city)       # noqa: E731
+
+    print(f'=== SUBURB FIX STARTING ({city}) ===\n')
 
     # ── Fetch all data first (read-only phase) ────────────────────────────────
     print('Fetching listings...')
-    active_result = _paged(
+    active_result = paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised, '
-                'bedrooms, property_type')
+                'bedrooms, property_type, listing_url')
         .eq('is_active', True)
     )
-    inactive_null = _paged(
+    inactive_null = paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised')
         .eq('is_active', False)
         .is_('suburb_normalised', 'null')
     )
-    inactive_empty = _paged(
+    inactive_empty = paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb, suburb_normalised')
         .eq('is_active', False)
         .eq('suburb_normalised', '')
     )
-    no_price_null = _paged(
+    no_price_null = paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .is_('price', 'null')
     )
-    no_price_zero = _paged(
+    no_price_zero = paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .eq('price', 0)
     )
     # Listings with no current price but a known first-seen price — likely unavailable/sold/let
-    price_gone_result = _paged(
+    price_gone_result = paged(
         supabase.table('listings')
         .select('listing_id, source, title, suburb_normalised, listing_type, price_at_first, listing_url, price_status, last_seen')
         .is_('price', 'null')
@@ -471,13 +542,13 @@ def run_suburb_fix() -> None:
     # Sold / under-offer listings are not available to buy, so they must not
     # feed price baselines: deactivate them. Scrapers set is_active=True on every
     # sighting, so this must run after each scrape (listing_status stays set).
-    not_live = _paged(
+    not_live = paged(
         supabase.table('listings')
         .select('listing_id')
         .eq('is_active', True)
         .in_('listing_status', ['under_offer', 'sold'])
     )
-    commercial = _paged(
+    commercial = paged(
         supabase.table('listings')
         .select('listing_id, title, bedrooms')
         .eq('is_active', True)
@@ -489,7 +560,7 @@ def run_suburb_fix() -> None:
     # the investment rent model, so we flag those as is_reference = TRUE. They
     # remain is_active = FALSE and never appear in user-facing results; only
     # compute_investment.py reads them, within a recency window.
-    good_but_inactive_result = _paged(
+    good_but_inactive_result = paged(
         supabase.table('listings')
         .select('listing_id,listing_type')
         .eq('is_active', False)
@@ -527,6 +598,7 @@ def run_suburb_fix() -> None:
     suburb_updates: dict[str, list[str]] = {}   # slug -> [listing_ids] to update
     deactivate_ids: list[str] = []
     failed_labels:  list[str] = []
+    unresolved_kept: list[str] = []      # no suburb found, left active (city policy)
     skipped = 0
 
     for listing in active_listings:
@@ -536,7 +608,9 @@ def run_suburb_fix() -> None:
         current_suburb = listing.get('suburb_normalised') or ''
         source         = listing.get('source') or ''
 
-        suburb_found = find_suburb_in_text(title) or find_suburb_in_text(raw_suburb)
+        suburb_found = find_suburb_in_text(title, city) or find_suburb_in_text(raw_suburb, city)
+        if suburb_found and current_suburb and not policy['overwrite_suburb']:
+            suburb_found = current_suburb            # keep the scraper's own (URL-derived) suburb
 
         if suburb_found:
             if suburb_found != current_suburb:
@@ -545,11 +619,13 @@ def run_suburb_fix() -> None:
             else:
                 skipped += 1
         else:
-            if not current_suburb:
+            if not current_suburb and policy['deactivate_unresolved']:
                 deactivate_ids.append(lid)
                 failed_labels.append(f'[{source}] {title[:60]}')
             else:
                 skipped += 1
+                if not current_suburb:
+                    unresolved_kept.append(f'[{source}] {title[:60]}')
 
     # ── Classify inactive no-suburb listings ──────────────────────────────────
     reactivate_updates: dict[str, list[str]] = {}  # slug -> [listing_ids]
@@ -560,10 +636,23 @@ def run_suburb_fix() -> None:
         raw_suburb = listing.get('suburb') or ''
         source     = listing.get('source') or ''
 
-        suburb_found = find_suburb_in_text(title) or find_suburb_in_text(raw_suburb)
+        if not policy['deactivate_unresolved']:
+            break                                    # this city never deactivated them, so nothing to reactivate
+        suburb_found = find_suburb_in_text(title, city) or find_suburb_in_text(raw_suburb, city)
         if suburb_found:
             reactivate_updates.setdefault(suburb_found, []).append(lid)
             print(f'  REACTIVATING [{source}] {title[:50]!r} -> {suburb_found}')
+
+    # ── Wrong-city check (report only — nothing is changed or hidden) ─────────
+    mismatched = [r for r in active_listings if wrong_city(r, city)]
+    if mismatched:
+        by_src: dict[str, int] = {}
+        for r in mismatched:
+            by_src[r.get('source') or '?'] = by_src.get(r.get('source') or '?', 0) + 1
+        print(f'\n!! {len(mismatched)} active listings tagged {city!r} have a URL in another town: '
+              + ', '.join(f'{k}={v}' for k, v in sorted(by_src.items())))
+        for r in mismatched[:5]:
+            print(f'   e.g. [{r.get("source")}] {(r.get("title") or "")[:50]!r} {r.get("listing_url")}')
 
     # ── Apply all updates in bulk ─────────────────────────────────────────────
     print('\nApplying updates...')
@@ -616,6 +705,7 @@ def run_suburb_fix() -> None:
     print(f'Flagged as REFERENCE:    {referenced}  (inactive rentals → is_reference=TRUE for rent model; still hidden from users)')
     print(f'Studios normalised:      {studios_normalised}  (studio/0.5/bachelor → bedrooms=0, apartment)')
     print(f'Deactivated (no suburb): {deactivated}')
+    print(f'No suburb, left active:  {len(unresolved_kept)}  ({city} policy: reported, not hidden)')
     print(f'Deactivated (no price):  {deactivated_no_price}')
     print(f'Deactivated (commercial):{deactivated_commercial}')
     print(f'Deactivated (sold/under offer):{deactivated_not_live}')

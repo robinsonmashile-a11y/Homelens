@@ -207,6 +207,14 @@ _PRICE_BOUNDS: dict[str, tuple[int, int]] = {
 
 SUFFICIENCY_MIN_N = 5   # minimum sample size for a track to be sufficient
 
+# ── Cities ────────────────────────────────────────────────────────────────────
+# The engine decides the city FIRST and works inside it: each pass fetches only
+# that city's listings, builds baselines only from them and looks listings up
+# only in that city's baselines. Suburb names repeat across cities (rosebank,
+# kensington, newlands ...), so nothing is ever compared across cities.
+HOME_CITY    = 'cape-town'                    # original behaviour, unchanged
+ENGINE_CITIES = ('cape-town', 'johannesburg')
+
 # ── Robust z-score constants (v4.1) ──────────────────────────────────────────
 MAD_TO_SIGMA        = 1.4826  # standard consistency constant: scales MAD to be
                               # comparable with a normal std dev. Do not change.
@@ -557,7 +565,7 @@ def populate_property_types(client) -> dict[str, int]:
 
 # ── Step 2 — Compute suburb baselines ────────────────────────────────────────
 
-def compute_suburb_baselines(client) -> dict[str, dict]:
+def compute_suburb_baselines(client, city: str = HOME_CITY, store_city: bool = False) -> dict[str, dict]:
     """
     Two-track baselines per group (suburb × listing_type × bedrooms × property_type).
 
@@ -574,7 +582,7 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
     Returns in-memory dict keyed by
     '{suburb}:{listing_type}:{bedrooms}:{property_type}'.
     """
-    logger.info('[2/4] Computing suburb baselines...')
+    logger.info('[2/4] Computing suburb baselines (%s)...', city)
 
     def _fetch(off, lim):
         try:
@@ -583,7 +591,7 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
                 .select('listing_id,suburb_normalised,listing_type,'
                         'bedrooms,property_type,price,size_m2,price_per_m2')
                 .eq('is_active', True)
-                .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
+                .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                 .eq('is_luxury', False)
                 .eq('is_outlier', False)
                 .filter('suburb_normalised', 'not.is', 'null')
@@ -601,7 +609,7 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
                     .select('listing_id,suburb_normalised,listing_type,'
                             'bedrooms,property_type,price,size_m2,price_per_m2')
                     .eq('is_active', True)
-                    .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
+                    .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                     .filter('suburb_normalised', 'not.is', 'null')
                     .filter('price', 'not.is', 'null')
                     .filter('bedrooms', 'not.is', 'null')
@@ -648,9 +656,11 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
 
     # Clear existing baselines
     try:
-        client.table('suburb_baselines') \
-              .delete().neq('suburb_normalised', '____never____').execute()
-        logger.info('  suburb_baselines cleared')
+        clear_q = client.table('suburb_baselines').delete().neq('suburb_normalised', '____never____')
+        if store_city:
+            clear_q = clear_q.eq('city', city)      # only this city's rows
+        clear_q.execute()
+        logger.info('  suburb_baselines cleared%s', f' ({city})' if store_city else '')
     except Exception as e:
         logger.warning('  Could not clear suburb_baselines: %s', e)
 
@@ -819,11 +829,12 @@ def compute_suburb_baselines(client) -> dict[str, dict]:
         }
 
         row: dict[str, Any] = {**baselines[key_str], 'computed_at': _now()}
+        conflict = 'suburb_normalised,listing_type,bedrooms,property_type'
+        if store_city:
+            row['city'] = city
+            conflict = 'city,' + conflict
         try:
-            client.table('suburb_baselines').upsert(
-                row,
-                on_conflict='suburb_normalised,listing_type,bedrooms,property_type',
-            ).execute()
+            client.table('suburb_baselines').upsert(row, on_conflict=conflict).execute()
             inserted += 1
         except Exception as e:
             logger.warning('Baseline insert failed (%s): %s', key_str, e)
@@ -869,6 +880,8 @@ def compute_listing_signals(
     client,
     baselines: dict[str, dict],
     attract_map: dict[str, int],
+    city: str = HOME_CITY,
+    clear: bool = True,
 ) -> dict[str, Any]:
     """
     For every active non-luxury non-outlier priced listing:
@@ -882,7 +895,7 @@ def compute_listing_signals(
 
     Returns summary stats dict.
     """
-    logger.info('[3/4] Computing listing signals...')
+    logger.info('[3/4] Computing listing signals (%s)...', city)
 
     def _fetch_listings(off, lim):
         try:
@@ -891,7 +904,7 @@ def compute_listing_signals(
                 .select('listing_id,suburb_normalised,listing_type,bedrooms,'
                         'property_type,price,size_m2,price_per_m2,title')
                 .eq('is_active', True)
-                .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
+                .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                 .eq('is_luxury', False)
                 .eq('is_outlier', False)
                 .filter('price', 'not.is', 'null')
@@ -905,7 +918,7 @@ def compute_listing_signals(
                     .select('listing_id,suburb_normalised,listing_type,bedrooms,'
                             'property_type,price,size_m2,price_per_m2,title')
                     .eq('is_active', True)
-                    .eq('city', 'cape-town')  # baselines are per-suburb; suburb names repeat across cities
+                    .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                     .filter('price', 'not.is', 'null')
                     .range(off, off + lim - 1)
                     .execute()
@@ -915,13 +928,14 @@ def compute_listing_signals(
     rows = _paginate(_fetch_listings)
     logger.info('  %d active priced listings to score', len(rows))
 
-    # Clear existing signals
-    try:
-        client.table('listing_signals') \
-              .delete().neq('listing_id', '____never____').execute()
-        logger.info('  listing_signals cleared')
-    except Exception as e:
-        logger.warning('  Could not clear listing_signals: %s', e)
+    # Clear existing signals (once per engine run, by the first city's pass)
+    if clear:
+        try:
+            client.table('listing_signals') \
+                  .delete().neq('listing_id', '____never____').execute()
+            logger.info('  listing_signals cleared')
+        except Exception as e:
+            logger.warning('  Could not clear listing_signals: %s', e)
 
     now = _now()
 
@@ -1302,6 +1316,33 @@ def _print_signal_summary(stats: dict[str, Any]) -> None:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
+def _baselines_have_city(client) -> bool:
+    """True once supabase/migrations/engine_city.sql has been applied."""
+    try:
+        client.table('suburb_baselines').select('city').limit(1).execute()
+        return True
+    except Exception as e:
+        if _is_schema_error(e):
+            return False
+        raise
+
+
+def _merge_signal_stats(total: dict, new: dict, city: str) -> dict:
+    """Combine per-city signal stats; the per-city numbers are kept under 'by_city'."""
+    if not total:
+        return {**new, 'by_city': {city: new}}
+    out = dict(total)
+    for k in ('total', 'track1', 'track2', 'blended', 'no_baseline', 'insufficient', 'no_track'):
+        out[k] = total.get(k, 0) + new.get(k, 0)
+    vc = defaultdict(int, total.get('verdict_counts', {}))
+    for v, n in new.get('verdict_counts', {}).items():
+        vc[v] += n
+    out['verdict_counts'] = dict(vc)
+    out['top5'] = (total.get('top5', []) + new.get('top5', []))[:5]
+    out['by_city'] = {**total.get('by_city', {}), city: new}
+    return out
+
+
 def run_engine() -> tuple[dict, dict[str, dict], dict[str, Any]]:
     """
     Full pipeline:
@@ -1323,16 +1364,37 @@ def run_engine() -> tuple[dict, dict[str, dict], dict[str, Any]]:
     # Step 1
     pt_counts = populate_property_types(client)
 
-    # Step 2
-    baselines = compute_suburb_baselines(client)
+    # Johannesburg (and any later city) needs suburb_baselines.city. Without that
+    # column the engine behaves exactly as before: Cape Town only.
+    cities = ENGINE_CITIES if _baselines_have_city(client) else (HOME_CITY,)
+    if len(cities) == 1:
+        logger.warning('suburb_baselines.city column missing — scoring %s only. '
+                       'Run supabase/migrations/engine_city.sql to add more cities.', HOME_CITY)
 
-    # Step 3
-    logger.info('[3/4] Loading suburb attractiveness scores...')
-    attract_map = _get_attractiveness_map(client)
-    logger.info('  %d suburbs with attractiveness scores', len(attract_map))
+    baselines: dict[str, dict] = {}
+    signal_stats: dict[str, Any] = {}
+    for i, city in enumerate(cities):
+        # Each city is a closed pass: its own listings, its own baselines, its own lookups.
+        city_baselines = compute_suburb_baselines(client, city, store_city=len(cities) > 1)
 
-    # Step 4
-    signal_stats = compute_listing_signals(client, baselines, attract_map)
+        # Step 3 — suburb_attractiveness holds Cape Town data keyed by suburb name only,
+        # so it must never be applied to another city (default score 50 there).
+        if city == HOME_CITY:
+            logger.info('[3/4] Loading suburb attractiveness scores...')
+            attract_map = _get_attractiveness_map(client)
+            logger.info('  %d suburbs with attractiveness scores', len(attract_map))
+        else:
+            attract_map = {}
+            logger.info('[3/4] %s: no attractiveness data — default score 50', city)
+
+        # Step 4
+        city_stats = compute_listing_signals(client, city_baselines, attract_map,
+                                             city=city, clear=(i == 0))
+
+        # Merge for reporting only; non-home keys carry the city so names can't collide.
+        for key, b in city_baselines.items():
+            baselines[key if city == HOME_CITY else f'{city}|{key}'] = {**b, 'city': city}
+        signal_stats = _merge_signal_stats(signal_stats, city_stats, city)
 
     # Reports
     _print_sufficiency_report(baselines)

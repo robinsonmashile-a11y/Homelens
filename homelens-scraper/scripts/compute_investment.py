@@ -789,6 +789,13 @@ def _paginate(fn, page_size: int = 1000) -> list[dict]:
     return results
 
 
+# The investment model (rent baselines, STR, rates, yields) only has Cape Town
+# data. Johannesburg listings are scored by the engine but never enter this
+# model, so their investment fields stay empty rather than being estimated from
+# Cape Town numbers. Every read below is scoped to this city.
+INVESTMENT_CITY = 'cape-town'
+
+
 def fetch_non_luxury_sale_signals(client) -> dict[str, dict]:
     """Return {listing_id: signal} for all non-luxury sale listings."""
     rows = _paginate(lambda off, lim: (
@@ -812,6 +819,7 @@ def fetch_sale_listings(client, listing_ids: list[str]) -> list[dict]:
             .select('listing_id,suburb_normalised,listing_type,price,'
                     'bedrooms,property_type,is_active,size_m2')
             .in_('listing_id', batch)
+            .eq('city', INVESTMENT_CITY)
             .eq('listing_type', 'sale')
             .eq('is_active', True)
             .execute()
@@ -1122,15 +1130,22 @@ def fetch_rent_baselines(client) -> tuple[dict, dict]:
       exact:    (suburb_normalised, bedrooms, property_type) -> row
       fallback: (suburb_normalised, bedrooms)               -> first matching row
     """
-    rows = _paginate(lambda off, lim: (
-        client.table('suburb_baselines')
-        .select('suburb_normalised,bedrooms,property_type,'
-                'median_price,sample_size_price,market_consistency')
-        .eq('listing_type', 'rent')
-        .eq('has_sufficient_data', True)
-        .range(off, off + lim - 1)
-        .execute()
-    ))
+    def _fetch(off, lim, scoped=True):
+        q = (client.table('suburb_baselines')
+             .select('suburb_normalised,bedrooms,property_type,'
+                     'median_price,sample_size_price,market_consistency')
+             .eq('listing_type', 'rent')
+             .eq('has_sufficient_data', True))
+        if scoped:                      # suburb names repeat across cities (rosebank, ...)
+            q = q.eq('city', INVESTMENT_CITY)
+        return q.range(off, off + lim - 1).execute()
+
+    try:
+        rows = _paginate(_fetch)
+    except Exception as e:              # city column not added yet: the table is Cape Town only
+        if not any(t in str(e).lower() for t in ('42703', 'pgrst204', 'does not exist', 'could not find')):
+            raise
+        rows = _paginate(lambda off, lim: _fetch(off, lim, scoped=False))
 
     exact:    dict = {}
     fallback: dict = {}
