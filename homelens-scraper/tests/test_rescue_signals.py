@@ -19,7 +19,7 @@ def test_cheap_listing_gets_guarded_deal():
     assert s['listing_id'] == 'x99' and s['confidence'] == 'low_blended'
     assert s['verdict'] in ('deal', 'fair')            # never strong_deal from a rescue
     assert s['homelens_score'] <= 55 and s['gap_pct'] < -30
-    assert s['deal_badge'] == 'excellent_deal'
+    assert s['deal_badge'] == 'good_deal'      # huge gap, but low_blended evidence never earns Excellent
 
 
 def test_skips_already_scored_missing_or_thin_pool():

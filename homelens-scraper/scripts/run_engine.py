@@ -88,3 +88,10 @@ if __name__ == '__main__':
     print(f"  Time elapsed              : {elapsed}s")
     print('━' * 60)
     print()
+
+    # ── Fresh deals: new listings the engine just scored as a deal (read-only) ──
+    try:
+        from scraper.reports import fresh_deals_report
+        fresh_deals_report()
+    except Exception as e:
+        logger.warning('Could not build fresh-deals report: %s', e)

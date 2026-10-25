@@ -34,6 +34,8 @@ import os
 import random
 from datetime import datetime, timezone
 
+from .detail import DETAIL_FIELDS, LOG_EXPECTED, log_missing
+from .detail_page import apply_details, read_detail_from_page
 from .utils import ForeignCurrencyError, assert_rand_price
 from .extractors import (
     classify_cost_label,
@@ -216,10 +218,16 @@ class CostEnricher:
         self.sel = selectors
         self.page = None
         self.checked: set[str] = set()
+        self.details_checked: set[str] = set()
         self.visited = 0
 
     async def start(self) -> None:
-        from .database import get_costs_checked_ids
+        from .database import get_costs_checked_ids, get_details_checked_ids
+        try:
+            if not os.environ.get('RECHECK_DETAILS'):
+                self.details_checked = get_details_checked_ids(self.source, COSTS_REFRESH_DAYS)
+        except Exception as e:
+            logger.warning('%s: could not load detail-checked ids (%s) — visiting all', self.source, e)
         try:
             # RECHECK_COSTS=1 forces every sale listing to be visited again —
             # use it after fixing a site's selectors, so listings checked while
@@ -236,28 +244,41 @@ class CostEnricher:
             )
         self.page = await owner.new_page()
         await self.page.route(_BLOCKED_ASSETS, lambda route: route.abort())
-        logger.info('%s: %d listings already have recently-checked costs', self.source, len(self.checked))
+        logger.info('%s: %d listings already have recently-checked costs, %d details',
+                    self.source, len(self.checked), len(self.details_checked))
 
     async def enrich(self, listing: dict) -> dict:
-        if listing.get('listing_type') != 'sale':
-            return listing                          # levies/rates: sale listings only
-        if listing.get('listing_id') in self.checked:
+        lid = listing.get('listing_id')
+        need_costs   = listing.get('listing_type') == 'sale' and lid not in self.checked   # levies/rates: sale only
+        need_details = lid not in self.details_checked
+        if not (need_costs or need_details):
             return listing
         try:
             await self.page.goto(listing['listing_url'], wait_until='domcontentloaded',
                                  timeout=DETAIL_TIMEOUT_MS)
             await asyncio.sleep(DETAIL_SETTLE_SEC)
-            costs = await read_costs_from_page(self.page, self.sel)
-            apply_costs(listing, costs)
+            if need_costs:
+                apply_costs(listing, await read_costs_from_page(self.page, self.sel))
+            if need_details:
+                fields = await read_detail_from_page(self.page, self.sel)
+                if need_costs:      # the cost reader owns levy/rates; report on its result
+                    fields['levy_monthly'] = listing.get('levy_monthly')
+                    fields['rates_monthly'] = listing.get('rates_monthly')
+                apply_details(listing, fields)
+                # What the page didn't give (after card values): the coverage-gap log.
+                merged = {k: (listing.get(k) if listing.get(k) is not None else fields.get(k))
+                          for k in DETAIL_FIELDS}
+                log_missing(self.source, lid or listing.get('listing_url', '?'), merged,
+                            expected=LOG_EXPECTED)
             self.visited += 1
         except Exception as e:
             # Not marked as checked → retried on the next run.
-            logger.warning('%s: costs visit failed for %s: %s', self.source, listing.get('listing_url'), e)
+            logger.warning('%s: detail visit failed for %s: %s', self.source, listing.get('listing_url'), e)
         await asyncio.sleep(random.uniform(*DETAIL_DELAY))
         return listing
 
     async def close(self) -> None:
-        logger.info('%s: visited %d listing pages for costs', self.source, self.visited)
+        logger.info('%s: visited %d listing pages (costs + details)', self.source, self.visited)
         try:
             if self.page:
                 await self.page.close()

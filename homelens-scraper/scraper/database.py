@@ -145,6 +145,82 @@ def get_costs_checked_ids(source: str, max_age_days: int = 30) -> set[str]:
         offset += page_size
 
 
+# ── Detail-page fields (supabase/migrations/detail_fields.sql) ────────────────
+
+# New columns from the migration. Until it is applied they are dropped from
+# writes (with one warning) so a scrape run never fails on a missing column.
+DETAIL_COLUMNS = ('parking', 'erf_size', 'is_furnished', 'building_name', 'security',
+                  'views', 'levy_includes', 'details_checked_at')
+# Already-existing columns the detail pass can also fill.
+_FILL_IF_EMPTY = ('size_m2', 'bedrooms', 'bathrooms')
+_ALWAYS_WHEN_FOUND = ('description', 'pet_friendly') + DETAIL_COLUMNS
+
+_detail_cols_exist: bool | None = None
+
+
+def _detail_columns_exist() -> bool:
+    global _detail_cols_exist
+    if _detail_cols_exist is None:
+        try:
+            get_client().table('listings').select(','.join(DETAIL_COLUMNS)).limit(1).execute()
+            _detail_cols_exist = True
+        except Exception:
+            logger.warning('listings detail columns missing — run '
+                           'supabase/migrations/detail_fields.sql. Skipping parking/erf_size/'
+                           'furnished/building/security/views/levy_includes for now.')
+            _detail_cols_exist = False
+    return _detail_cols_exist
+
+
+def _without_missing_detail_cols(row: dict) -> dict:
+    if _detail_columns_exist():
+        return row
+    return {k: v for k, v in row.items() if k not in DETAIL_COLUMNS}
+
+
+def _merge_details(listing: dict, old: dict, update_data: dict) -> None:
+    """
+    Update rules for the detail-page fields on an existing row.
+
+    A value is only ever written when this run found one: a stored value is
+    never replaced with null. size/beds/baths fill gaps only (a stored number
+    stays), and a newly filled size recomputes price_per_m2.
+    """
+    for key in _ALWAYS_WHEN_FOUND:
+        if listing.get(key) is not None:
+            update_data[key] = listing[key]
+    for key in _FILL_IF_EMPTY:
+        if listing.get(key) is not None and old.get(key) is None:
+            update_data[key] = listing[key]
+    if 'size_m2' in update_data:
+        price = listing.get('price') or old.get('price')
+        if price:
+            update_data['price_per_m2'] = round(price / update_data['size_m2'], 2)
+
+
+def get_details_checked_ids(source: str, max_age_days: int = 30) -> set[str]:
+    """listing_ids of `source` whose detail page was read within max_age_days."""
+    if not _detail_columns_exist():
+        return set()
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    ids: set[str] = set()
+    offset, page_size = 0, 1000
+    while True:
+        rows = (
+            client.table('listings')
+            .select('listing_id')
+            .eq('source', source)
+            .gte('details_checked_at', cutoff)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        ).data or []
+        ids.update(r['listing_id'] for r in rows)
+        if len(rows) < page_size:
+            return ids
+        offset += page_size
+
+
 def upsert_listing(listing: dict) -> str:
     """
     Insert new listing or update existing one.
@@ -155,7 +231,8 @@ def upsert_listing(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen, listing_status, property_type')
+        .select('listing_id, price, price_history, first_seen, listing_status, property_type, '
+                'size_m2, bedrooms, bathrooms')
         .eq('listing_id', listing['listing_id'])
         .execute()
     )
@@ -172,7 +249,7 @@ def upsert_listing(listing: dict) -> str:
         listing['last_scraped_at'] = now
         if listing.get('listing_status') not in (None, 'live'):
             listing['status_changed_at'] = now
-        client.table('listings').insert(listing).execute()
+        client.table('listings').insert(_without_missing_detail_cols(listing)).execute()
         return 'new'
 
     old = existing.data[0]
@@ -189,6 +266,7 @@ def upsert_listing(listing: dict) -> str:
         update_data['image_url'] = listing['image_url']
 
     _merge_status_and_costs(listing, old, update_data, now)
+    _merge_details(listing, old, update_data)
 
     # A type the scraper read from the card fills a missing/'other' type only;
     # it never overwrites a type the engine or an earlier run already settled.
@@ -221,16 +299,16 @@ def upsert_listing(listing: dict) -> str:
         except (ValueError, AttributeError):
             pass
 
-        client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+        client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
         return 'updated'
 
     # Case 2: listing became POA — clear stored price so it can't corrupt baselines
     if new_status == 'poa' and old_price is not None:
         update_data['price'] = None
-        client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+        client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
         return 'updated'
 
-    client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+    client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
     return 'unchanged'
 
 
@@ -245,7 +323,8 @@ def upsert_listing_by_url(listing: dict) -> str:
 
     existing = (
         client.table('listings')
-        .select('listing_id, price, price_history, first_seen, listing_status, property_type')
+        .select('listing_id, price, price_history, first_seen, listing_status, property_type, '
+                'size_m2, bedrooms, bathrooms')
         .eq('listing_url', listing['listing_url'])
         .execute()
     )
@@ -256,7 +335,8 @@ def upsert_listing_by_url(listing: dict) -> str:
         # refreshed or re-activated.
         existing = (
             client.table('listings')
-            .select('listing_id, price, price_history, first_seen, listing_status, property_type')
+            .select('listing_id, price, price_history, first_seen, listing_status, property_type, '
+                'size_m2, bedrooms, bathrooms')
             .eq('listing_id', listing['listing_id'])
             .execute()
         )
@@ -274,7 +354,7 @@ def upsert_listing_by_url(listing: dict) -> str:
         listing['last_scraped_at'] = now
         if listing.get('listing_status') not in (None, 'live'):
             listing['status_changed_at'] = now
-        client.table('listings').insert(listing).execute()
+        client.table('listings').insert(_without_missing_detail_cols(listing)).execute()
         return 'new'
 
     old = existing.data[0]
@@ -294,6 +374,7 @@ def upsert_listing_by_url(listing: dict) -> str:
         update_data['image_url'] = listing['image_url']
 
     _merge_status_and_costs(listing, old, update_data, now)
+    _merge_details(listing, old, update_data)
 
     # A type the scraper read from the card fills a missing/'other' type only;
     # it never overwrites a type the engine or an earlier run already settled.
@@ -322,15 +403,15 @@ def upsert_listing_by_url(listing: dict) -> str:
         except (ValueError, AttributeError):
             pass
 
-        client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+        client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
         return 'updated'
 
     if new_status == 'poa' and old_price is not None:
         update_data['price'] = None
-        client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+        client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
         return 'updated'
 
-    client.table('listings').update(update_data).eq('listing_id', old['listing_id']).execute()
+    client.table('listings').update(_without_missing_detail_cols(update_data)).eq('listing_id', old['listing_id']).execute()
     return 'unchanged'
 
 

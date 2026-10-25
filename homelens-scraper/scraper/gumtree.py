@@ -24,6 +24,7 @@ from playwright.async_api import (
 )
 
 from .utils import clean_personal_info, normalise_suburb
+from .detail_page import apply_details, read_detail_from_page
 from .enrich import apply_costs, read_costs_from_page, resolve_status
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,7 @@ async def _extract_detail(page: Page, url: str) -> dict:
 
         # Levies / rates from the ad text (page text first, then description).
         detail['costs'] = await read_costs_from_page(page, SELECTORS)
+        detail['fields'] = await read_detail_from_page(page, SELECTORS)
 
         # Date posted
         date_el = await page.query_selector(
@@ -315,11 +317,14 @@ async def scrape_listing_type(
 
                     detail = await _extract_detail(detail_page, card['listing_url'])
                     costs = detail.pop('costs', None)
+                    fields = detail.pop('fields', None)
                     # Don't let a "live/default" from a page with no status text
                     # overwrite a card-level status that was found.
                     if detail.get('listing_status') == 'live':
                         detail.pop('listing_status'); detail.pop('status_source', None)
                     merged = {**card, **detail}
+                    if fields:
+                        apply_details(merged, fields)     # card values kept; erf/parking/extras added
                     if listing_type == 'sale' and costs:      # levies/rates: sale only
                         apply_costs(merged, costs)
                     yield merged

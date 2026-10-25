@@ -156,6 +156,7 @@ def fetch_pending(client) -> list[dict]:
             .select('listing_id,title,suburb_normalised,price,bedrooms,bathrooms,'
                     'size_m2,price_per_m2,property_type,description,days_on_market')
             .in_('listing_id', batch_ids)
+            .eq('city', 'cape-town')   # prompt and market context are Cape Town only
             .execute()
         )
         for listing in (listings_result.data or []):
