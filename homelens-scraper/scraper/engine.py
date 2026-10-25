@@ -347,15 +347,43 @@ def _blended_final_score(raw: int) -> int:
 # listing can legitimately carry 'excellent_deal' (Option A); its low rating
 # beside the badge is what signals caution. Thresholds validated on real data:
 # 25%/10% put ~15% of stock in Excellent (scarce enough to mean something).
-BADGE_EXCELLENT = 25.0   # % below market for Excellent Deal
+BADGE_EXCELLENT = 40.0   # % below market for Excellent Deal (needs solid evidence, below)
 BADGE_GOOD      = 10.0   # % below market for Good Deal / above for Above Market
 BADGE_OVERPRICED = 25.0  # % above market for Overpriced
 
-def _deal_badge(gap_pct: float | None) -> str | None:
+# "Excellent" is the strongest claim the app makes, so a big gap alone is not
+# enough: a huge discount is as likely to be bad data as a bargain. It needs
+#   - confidence medium or better (>= 7 comparables; thin and blended baselines
+#     never qualify), and
+#   - for price-per-m2 comparisons, a floor size that is believable: not above
+#     SIZE_MAX and not equal to the plot size (a plot used as floor area makes
+#     price/m2 look tiny).
+# A listing that has the gap but not the evidence gets 'good_deal'.
+EXCELLENT_CONFIDENCE = ('medium', 'medium-high', 'high')
+
+
+def _excellent_evidence(confidence: str | None, comparison_method: str | None,
+                        size_m2: float | None, erf_size: float | None) -> bool:
+    if confidence not in EXCELLENT_CONFIDENCE:
+        return False
+    if comparison_method == 'price_per_m2':
+        if size_m2 is None or size_m2 > SIZE_MAX:
+            return False
+        if erf_size is not None and abs(size_m2 - erf_size) < 1:
+            return False
+    return True
+
+
+def _deal_badge(gap_pct: float | None, confidence: str | None = None,
+                comparison_method: str | None = None, size_m2: float | None = None,
+                erf_size: float | None = None) -> str | None:
     """Buyer-facing badge from gap %. None only when gap is unavailable."""
     if gap_pct is None:
         return None
-    if gap_pct <= -BADGE_EXCELLENT: return 'excellent_deal'
+    if gap_pct <= -BADGE_EXCELLENT:
+        if _excellent_evidence(confidence, comparison_method, size_m2, erf_size):
+            return 'excellent_deal'
+        return 'good_deal'
     if gap_pct <= -BADGE_GOOD:      return 'good_deal'
     if gap_pct <   BADGE_GOOD:      return 'fair'
     if gap_pct <   BADGE_OVERPRICED: return 'above_market'
@@ -442,7 +470,8 @@ def build_rescue_signal_rows(rows: list[dict], scored_ids: set[str],
                 'sample_size_ceiling': BLENDED_SCORE_CEILING,
                 'attractiveness_score': attract, 'final_price_score': price_score,
                 'homelens_score': score, 'verdict': verdict, 'verdict_label': label,
-                'deal_badge': _deal_badge(gap_pct), 'confidence': BLENDED_CONFIDENCE,
+                'deal_badge': _deal_badge(gap_pct, BLENDED_CONFIDENCE, method, size, listing.get('erf_size')),
+                'confidence': BLENDED_CONFIDENCE,
                 'sample_size': len(pool), 'market_consistency': None,
                 'is_luxury': False, 'is_outlier': False,
                 'baseline_method': 'blended', 'parent_sample_size': len(pool),
@@ -902,7 +931,7 @@ def compute_listing_signals(
             return (
                 client.table('listings')
                 .select('listing_id,suburb_normalised,listing_type,bedrooms,'
-                        'property_type,price,size_m2,price_per_m2,title')
+                        'property_type,price,size_m2,price_per_m2,title,erf_size')
                 .eq('is_active', True)
                 .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                 .eq('is_luxury', False)
@@ -916,7 +945,7 @@ def compute_listing_signals(
                 return (
                     client.table('listings')
                     .select('listing_id,suburb_normalised,listing_type,bedrooms,'
-                            'property_type,price,size_m2,price_per_m2,title')
+                            'property_type,price,size_m2,price_per_m2,title,erf_size')
                     .eq('is_active', True)
                     .eq('city', city)  # baselines are per-suburb; suburb names repeat across cities
                     .filter('price', 'not.is', 'null')
@@ -1105,7 +1134,8 @@ def compute_listing_signals(
             verdict_counts[verdict] += 1
 
             # ── Deal badge (v4.3) — independent of score, driven by gap % ──
-            deal_badge = _deal_badge(gap_pct)
+            deal_badge = _deal_badge(gap_pct, confidence, comparison_method,
+                                     size_m2, listing.get('erf_size'))
             sig_row: dict[str, Any] = {
                 'listing_id':            listing['listing_id'],
                 'suburb_normalised':     suburb,
