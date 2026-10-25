@@ -195,6 +195,24 @@ ALTER TABLE listing_signals ADD COLUMN IF NOT EXISTS deal_badge TEXT;
 SIZE_MIN   = 15     # m²   — below this is a data error
 SIZE_MAX   = 800    # m²   — above this is likely ERF/plot size
 
+# ── Houses: plot (erf) first ──────────────────────────────────────────────────
+# For a freestanding house the land is most of the value and erf size is on far
+# more listings than floor size. Sale houses with a usable erf are compared on
+# price per m² of ERF, against other houses of a similar plot size in the same
+# suburb (price per erf m² falls as plots get bigger, so a flat suburb median
+# would make every large plot look cheap). Houses without a usable erf, and every
+# other property type, are scored exactly as before.
+ERF_MIN   = 150      # m²   — below this the 'erf' is not a house plot (100 is a scraper placeholder)
+ERF_MAX   = 4_000    # m²   — above this: smallholding/farm, not comparable
+ERF_BANDS: tuple[tuple[int, int], ...] = ((0, 400), (400, 700), (700, 1_200),
+                                          (1_200, 2_500), (2_500, ERF_MAX + 1))
+ERF_FLOOR_RATIO = 1.5                # floor size above 1.5x the plot: one of the two is wrong
+ERF_PM2_BOUNDS = (500, 150_000)      # R per erf m² — outside this is a data error
+ERF_METHOD   = 'price_per_erf_m2'    # listing_signals.comparison_method for these
+# Erf says "cheap" but floor size says "not cheap": confidence is dropped.
+ERF_DISAGREE_POINTS = 30.0           # floor gap % minus erf gap % (pts) to disagree
+ERF_DISAGREE_FLOOR  = -10.0          # ...and the floor gap must not itself be a deal
+
 # Per listing_type price-per-m² and price bounds
 _PM2_BOUNDS: dict[str, tuple[float, float]] = {
     'sale': (2_000,    200_000),
@@ -257,6 +275,14 @@ def _robust_spread(median: float | None, mad: float | None) -> float | None:
     if median is None or median <= 0:
         return None
     return max(MAD_TO_SIGMA * (mad or 0.0), MIN_SPREAD_FRACTION * median)
+
+
+def _consistency(spread: float | None, median: float | None) -> str | None:
+    cv = spread / median if (spread and median and median > 0) else None
+    if cv is None:
+        return None
+    return ('very_consistent' if cv < 0.15 else 'consistent' if cv < 0.25
+            else 'moderate' if cv < 0.40 else 'volatile')
 
 
 def _robust_z(x: float, median: float, mad: float) -> float | None:
@@ -366,6 +392,8 @@ def _excellent_evidence(confidence: str | None, comparison_method: str | None,
                         size_m2: float | None, erf_size: float | None) -> bool:
     if confidence not in EXCELLENT_CONFIDENCE:
         return False
+    if comparison_method == ERF_METHOD:
+        return erf_size is not None and ERF_MIN <= erf_size <= ERF_MAX
     if comparison_method == 'price_per_m2':
         if size_m2 is None or size_m2 > SIZE_MAX:
             return False
@@ -876,6 +904,108 @@ def compute_suburb_baselines(client, city: str = HOME_CITY, store_city: bool = F
     return baselines
 
 
+# ── Houses: erf (plot) baselines ─────────────────────────────────────────────
+
+def _erf_band(erf: float | None) -> str | None:
+    """Plot-size band label ('400-700') for a usable erf, else None."""
+    if erf is None or not (ERF_MIN <= erf <= ERF_MAX):
+        return None
+    for lo, hi in ERF_BANDS:
+        if lo <= erf < hi:
+            return f'{lo}-{min(hi, ERF_MAX)}'
+    return None
+
+
+def _erf_pm2(price, erf, floor=None) -> float | None:
+    """Price per erf m² for a sale house, or None when erf/price are unusable.
+    A floor size far larger than the plot means the two fields disagree: unusable."""
+    if not price or _erf_band(erf) is None:
+        return None
+    if floor and floor > erf * ERF_FLOOR_RATIO:
+        return None
+    lo, hi = _PRICE_BOUNDS['sale']
+    if not (lo <= price <= hi):
+        return None
+    pm2 = price / erf
+    return pm2 if ERF_PM2_BOUNDS[0] <= pm2 <= ERF_PM2_BOUNDS[1] else None
+
+
+def compute_erf_baselines(client, city: str = HOME_CITY) -> dict[str, dict]:
+    """
+    Sale-house baselines on price per ERF m², per suburb x plot-size band
+    (bedrooms deliberately ignored: this is a land comparison and splitting by
+    bedrooms would leave most groups too thin). A band needs SUFFICIENCY_MIN_N
+    houses; thinner bands are stored but not used, and those houses fall back
+    to the floor-size / price-only baselines.
+
+    Stored in suburb_erf_baselines (supabase/migrations/erf_baselines.sql). If
+    that table does not exist yet this returns {} and the engine scores houses
+    exactly as before. Returns {'{suburb}:{band}': baseline}.
+    """
+    logger.info('  Computing house erf baselines (%s)...', city)
+
+    def _fetch(off, lim):
+        return (
+            client.table('listings')
+            .select('listing_id,suburb_normalised,price,erf_size,size_m2')
+            .eq('is_active', True)
+            .eq('city', city)
+            .eq('listing_type', 'sale')
+            .eq('property_type', 'house')
+            .eq('is_luxury', False)
+            .eq('is_outlier', False)
+            .filter('suburb_normalised', 'not.is', 'null')
+            .filter('price', 'not.is', 'null')
+            .filter('erf_size', 'not.is', 'null')
+            .range(off, off + lim - 1)
+            .execute()
+        )
+
+    try:
+        rows = _paginate(_fetch)
+    except Exception as e:
+        logger.warning('  erf baselines skipped (%s)', e)
+        return {}
+
+    groups: dict[tuple, list[float]] = defaultdict(list)
+    for r in rows:
+        pm2 = _erf_pm2(r.get('price'), r.get('erf_size'), r.get('size_m2'))
+        if pm2 is not None:
+            groups[(r['suburb_normalised'], _erf_band(r['erf_size']))].append(pm2)
+
+    now = _now()
+    baselines: dict[str, dict] = {}
+    for (suburb, band), vals in groups.items():
+        n = len(vals)
+        med = round(statistics.median(vals), 2)
+        mad = round(_mad(vals), 2)
+        spread = _robust_spread(med, mad)
+        sv = sorted(vals)
+        baselines[f'{suburb}:{band}'] = {
+            'city': city, 'suburb_normalised': suburb, 'listing_type': 'sale', 'erf_band': band,
+            'sample_size': n, 'median_price_per_erf_m2': med, 'mad_price_per_erf_m2': mad,
+            'p25_price_per_erf_m2': round(sv[n // 4], 2), 'p75_price_per_erf_m2': round(sv[3 * n // 4], 2),
+            'market_consistency': _consistency(spread, med),
+            'has_sufficient_data': n >= SUFFICIENCY_MIN_N and spread is not None,
+            'computed_at': now,
+        }
+
+    try:
+        client.table('suburb_erf_baselines').delete().eq('city', city).execute()
+        out = list(baselines.values())
+        for i in range(0, len(out), 200):
+            client.table('suburb_erf_baselines').upsert(
+                out[i:i + 200], on_conflict='city,suburb_normalised,listing_type,erf_band').execute()
+    except Exception as e:
+        logger.warning('  suburb_erf_baselines not written (%s) — houses keep their usual scoring '
+                       'until supabase/migrations/erf_baselines.sql is applied', e)
+        return {}
+
+    n_ok = sum(1 for b in baselines.values() if b['has_sufficient_data'])
+    logger.info('  %d erf baseline groups stored (%d sufficient)', len(baselines), n_ok)
+    return baselines
+
+
 # ── Step 3 helper — Attractiveness lookup ────────────────────────────────────
 
 def _get_attractiveness_map(client) -> dict[str, int]:
@@ -911,9 +1041,12 @@ def compute_listing_signals(
     attract_map: dict[str, int],
     city: str = HOME_CITY,
     clear: bool = True,
+    erf_baselines: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     """
     For every active non-luxury non-outlier priced listing:
+      0. Sale houses with a usable erf use their suburb x plot-size band baseline
+         (price per erf m²) when it is sufficient; otherwise steps 1-6 as below
       1. Look up baseline (exact group match; bedrooms=None fallback)
       2. Require has_sufficient_data = TRUE
       3. Require sufficient_track covers the listing's data track
@@ -974,6 +1107,8 @@ def compute_listing_signals(
     n_no_base  = 0
     n_insuff   = 0
     n_no_track = 0
+    n_erf      = 0
+    n_erf_disagree = 0
     verdict_counts: dict[str, int] = defaultdict(int)
     top5: list[tuple[int, float, dict]] = []
     signal_rows: list[dict] = []
@@ -999,6 +1134,25 @@ def compute_listing_signals(
                 fb_key   = f'{suburb}:{listing_type}:None:{property_type}'
                 baseline = baselines.get(fb_key)
 
+            # ── Houses: plot size first ───────────────────────────────────
+            floor_baseline, floor_pm2, floor_size = baseline, pm2, size_m2
+            erf_size   = listing.get('erf_size')
+            erf_base   = None
+            if erf_baselines and property_type == 'house' and listing_type == 'sale':
+                erf_pm2 = _erf_pm2(price, erf_size, size_m2)
+                band    = _erf_band(erf_size)
+                eb      = erf_baselines.get(f'{suburb}:{band}') if erf_pm2 is not None else None
+                if eb and eb.get('has_sufficient_data'):
+                    erf_base = eb
+                    baseline = {
+                        'has_sufficient_data': True, 'sufficient_track': 'track1',
+                        'median_price_per_m2': eb['median_price_per_erf_m2'],
+                        'mad_price_per_m2':    eb['mad_price_per_erf_m2'],
+                        'sample_size_pm2':     eb['sample_size'],
+                        'market_consistency':  eb.get('market_consistency'),
+                    }
+                    size_m2, pm2 = erf_size, erf_pm2
+
             if baseline is None:
                 n_no_base += 1
                 continue
@@ -1012,7 +1166,7 @@ def compute_listing_signals(
 
             # ── Determine listing track ───────────────────────────────────
             pm2_lo = _PM2_BOUNDS.get(listing_type, _PM2_BOUNDS['sale'])[0]
-            listing_has_pm2 = (
+            listing_has_pm2 = erf_base is not None or (
                 size_m2 is not None and size_m2 > SIZE_MIN
                 and pm2 is not None and pm2 > pm2_lo
             )
@@ -1098,6 +1252,25 @@ def compute_listing_signals(
                 n_no_track += 1
                 continue
 
+            erf_disagrees = False
+            if erf_base is not None:
+                comparison_method = ERF_METHOD
+                n_erf += 1
+                # Cross-check against the floor-size view of the same house: if the
+                # plot says "cheap" but the floor size says "not cheap" (big plot,
+                # small or poor house), do not let it claim a confident deal.
+                f_med = (floor_baseline or {}).get('median_price_per_m2')
+                f_mad = (floor_baseline or {}).get('mad_price_per_m2')
+                if (floor_baseline and floor_baseline.get('sufficient_track') in ('track1', 'both')
+                        and f_med and floor_size and SIZE_MIN < floor_size <= SIZE_MAX
+                        and abs(floor_size - erf_size) >= 1
+                        and floor_pm2 and _robust_spread(f_med, f_mad) is not None):
+                    floor_gap = (floor_pm2 - f_med) / f_med * 100
+                    if (floor_gap - gap_pct >= ERF_DISAGREE_POINTS
+                            and floor_gap > ERF_DISAGREE_FLOOR):
+                        erf_disagrees = True
+                        n_erf_disagree += 1
+
             # ── Scoring ───────────────────────────────────────────────────
             if baseline_method == 'blended':
                 # v4.2.1 guardrails: compressed score band + fixed low badge.
@@ -1127,10 +1300,12 @@ def compute_listing_signals(
                 # v4.2 guardrail: no extreme verdicts from blended baselines;
                 # labels always hedged
                 verdict, verdict_label = _cap_blended_verdict(verdict, verdict_label)
-            elif confidence == 'low':
+            elif confidence == 'low' or erf_disagrees:
                 # v4.2.1: direct baselines with only 5-6 listings keep their
                 # verdict slug but display a hedged label
                 verdict_label = _HEDGED_LABELS.get(verdict, verdict_label)
+                if erf_disagrees:
+                    confidence = 'low'      # plot and floor size disagree
             verdict_counts[verdict] += 1
 
             # ── Deal badge (v4.3) — independent of score, driven by gap % ──
@@ -1236,6 +1411,8 @@ def compute_listing_signals(
         'track1':         n_track1,
         'track2':         n_track2,
         'blended':        n_blended,   # v4.2
+        'erf':            n_erf,
+        'erf_disagree':   n_erf_disagree,
         'no_baseline':    n_no_base,
         'insufficient':   n_insuff,
         'no_track':       n_no_track,
@@ -1362,7 +1539,8 @@ def _merge_signal_stats(total: dict, new: dict, city: str) -> dict:
     if not total:
         return {**new, 'by_city': {city: new}}
     out = dict(total)
-    for k in ('total', 'track1', 'track2', 'blended', 'no_baseline', 'insufficient', 'no_track'):
+    for k in ('total', 'track1', 'track2', 'blended', 'erf', 'erf_disagree',
+              'no_baseline', 'insufficient', 'no_track'):
         out[k] = total.get(k, 0) + new.get(k, 0)
     vc = defaultdict(int, total.get('verdict_counts', {}))
     for v, n in new.get('verdict_counts', {}).items():
@@ -1417,9 +1595,13 @@ def run_engine() -> tuple[dict, dict[str, dict], dict[str, Any]]:
             attract_map = {}
             logger.info('[3/4] %s: no attractiveness data — default score 50', city)
 
+        # Houses are compared on plot size first (own table; {} until its migration is applied)
+        erf_baselines = compute_erf_baselines(client, city)
+
         # Step 4
         city_stats = compute_listing_signals(client, city_baselines, attract_map,
-                                             city=city, clear=(i == 0))
+                                             city=city, clear=(i == 0),
+                                             erf_baselines=erf_baselines)
 
         # Merge for reporting only; non-home keys carry the city so names can't collide.
         for key, b in city_baselines.items():
