@@ -142,8 +142,36 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scripts/run_engine.py
 
-  investment:
+  # Maddy scores the active listings the engine could not (no usable baseline) and writes them
+  # to listing_signals as scored_by='maddy'. The engine is primary and replaces a Maddy row as
+  # soon as it can score the listing. Unchanged listings are skipped, so only new/changed ones
+  # cost anything. The script never fails the run (it logs and exits 0).
+  maddy:
     needs: engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    name: maddy fallback
+    defaults:
+      run:
+        working-directory: homelens-scraper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: homelens-scraper/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Maddy fallback scoring
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/run_maddy_fallback.py
+
+  investment:
+    needs: [engine, maddy]
+    if: ${{ !cancelled() && needs.engine.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     name: investment scores

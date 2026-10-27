@@ -11,9 +11,10 @@ Pipeline steps (in order):
   4. run_batch5_scrapers.py      (harcourts, justproperty, duarte, exprealty, lionlead, abc_international)
   5. fix_suburbs.py
   6. run_engine.py
-  7. compute_investment.py
-  8. generate_explanations.py
-  9. backup_db.py
+  7. run_maddy_fallback.py
+  8. compute_investment.py
+  9. generate_explanations.py
+  10. backup_db.py
 
 Usage:
     python scripts/scheduler.py             # run on schedule (blocking)
@@ -67,6 +68,7 @@ PIPELINE_STEPS = [
     ('Scrapers (batch 4)',  SCRIPTS_DIR / 'run_batch5_scrapers.py'),
     ('Fix suburbs',        SCRIPTS_DIR / 'fix_suburbs.py'),
     ('Engine',             SCRIPTS_DIR / 'run_engine.py'),
+    ('Maddy fallback',     SCRIPTS_DIR / 'run_maddy_fallback.py'),
     ('Investment scores',  SCRIPTS_DIR / 'compute_investment.py'),
     ('Explanations',       SCRIPTS_DIR / 'generate_explanations.py'),
     ('Backup',             SCRIPTS_DIR / 'backup_db.py'),

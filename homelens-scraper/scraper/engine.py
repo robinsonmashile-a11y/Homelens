@@ -1008,6 +1008,17 @@ def compute_erf_baselines(client, city: str = HOME_CITY) -> dict[str, dict]:
 
 # ── Step 3 helper — Attractiveness lookup ────────────────────────────────────
 
+def _signals_have_scored_by(client) -> bool:
+    """True once supabase/migrations/maddy_fallback.sql has been applied."""
+    try:
+        client.table('listing_signals').select('scored_by').limit(1).execute()
+        return True
+    except Exception as e:
+        if _is_schema_error(e):
+            return False
+        raise
+
+
 def _get_attractiveness_map(client) -> dict[str, int]:
     """
     Fetch suburb_attractiveness table.
@@ -1090,12 +1101,21 @@ def compute_listing_signals(
     rows = _paginate(_fetch_listings)
     logger.info('  %d active priced listings to score', len(rows))
 
-    # Clear existing signals (once per engine run, by the first city's pass)
+    # Maddy's fallback rows (scored_by = 'maddy', written after the engine by
+    # scripts/run_maddy_fallback.py) survive the clear: they are cached by input_hash and
+    # only replaced when the engine scores that listing itself (upsert below).
+    # Before supabase/migrations/maddy_fallback.sql is applied the column does not exist
+    # and everything behaves as before.
+    has_scored_by = _signals_have_scored_by(client)
+
+    # Clear existing engine signals (once per engine run, by the first city's pass)
     if clear:
         try:
-            client.table('listing_signals') \
-                  .delete().neq('listing_id', '____never____').execute()
-            logger.info('  listing_signals cleared')
+            q = client.table('listing_signals').delete().neq('listing_id', '____never____')
+            if has_scored_by:
+                q = q.neq('scored_by', 'maddy')
+            q.execute()
+            logger.info('  listing_signals cleared%s', ' (engine rows)' if has_scored_by else '')
         except Exception as e:
             logger.warning('  Could not clear listing_signals: %s', e)
 
@@ -1377,6 +1397,11 @@ def compute_listing_signals(
     if rescue_rows:
         logger.info('  %d hand-approved listings scored against their suburb pool', len(rescue_rows))
         signal_rows.extend(rescue_rows)
+
+    # An engine row always takes over from a Maddy fallback row for the same listing.
+    if has_scored_by:
+        for r in signal_rows:
+            r.update(scored_by='engine', maddy_reason=None, maddy_what_it_is=None, input_hash=None)
 
     # ── Batch upsert ──────────────────────────────────────────────────────────
     upserted   = 0
