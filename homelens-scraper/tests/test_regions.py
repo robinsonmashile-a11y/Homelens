@@ -88,3 +88,19 @@ def test_platform_scrapers_use_regions_and_the_guard(site):
     import inspect
     src = inspect.getsource(importlib.import_module(f'scraper.{site}'))
     assert 'for city in SCRAPE_TARGETS' in src and f'region_guard(_run_{site}_city(city), city)' in src
+
+
+def test_guard_leaves_a_region_that_runs_out_of_its_own_listings():
+    own = [f'https://x/results/residential/to-let/goodwood/a/house/{i}/' for i in range(5)]
+    other = [f'https://x/results/residential/to-let/cape-town/a/house/{i}/' for i in range(500)]
+    seen = []
+
+    async def go():
+        async def counting():
+            for u in own + other:
+                seen.append(u)
+                yield {'listing_url': u}
+        return [x async for x in region_guard(counting(), _target('goodwood'))]
+
+    assert [l['listing_url'] for l in asyncio.run(go())] == own
+    assert len(seen) <= len(own) + cities.REGION_PROBE
