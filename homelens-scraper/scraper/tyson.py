@@ -29,7 +29,7 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
-from scraper.cities import CITIES, city_index, city_url
+from scraper.cities import SCRAPE_TARGETS, city_index, city_url, region_guard
 from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.tyson')
@@ -76,9 +76,11 @@ RENT_SEARCH_ID = '5d082db1-5360-57d8-a85f-afe3178f84f1'
 
 # sale ≈ 409 listings / 16 per page ≈ 26 pages  (max 30 with margin)
 # rent ≈ 143 listings / 16 per page ≈  9 pages  (max 12 with margin)
+# Safety ceiling only: every scraper stops on an empty page or a repeated one. Regions such as
+# Sandton hold hundreds of listings (16 per page), so a low cap silently truncates them.
 MAX_PAGES: dict[str, int] = {
-    'sale': 30,
-    'rent': 12,
+    'sale': 80,
+    'rent': 60,
 }
 
 SCROLL_STEPS   = 12    # increments to trigger lazy-loaded cards
@@ -354,8 +356,8 @@ async def _run_tyson_city(city: dict) -> AsyncGenerator[dict, None]:
         await enricher.start()
 
         lt_configs = [
-            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['slug'] == 'cape-town' else None),
-            ('rent', city_url(RENT_BASE_PATH, city), RENT_SEARCH_ID if city['slug'] == 'cape-town' else None),
+            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['platform_path'] == 'cape-town' else None),
+            ('rent', city_url(RENT_BASE_PATH, city), RENT_SEARCH_ID if city['platform_path'] == 'cape-town' else None),
         ]
 
         for lt_name, base_path, search_id in lt_configs:
@@ -429,9 +431,9 @@ async def _run_tyson_city(city: dict) -> AsyncGenerator[dict, None]:
 
 
 async def run_tyson_scraper() -> AsyncGenerator[dict, None]:
-    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
-    for city in CITIES:
+    """Scrapes every region of every city (scraper.cities.SCRAPE_TARGETS), tagging each listing with its city."""
+    for city in SCRAPE_TARGETS:
         logger.info('══ tyson — %s ══', city['name'])
-        async for listing in _run_tyson_city(city):
+        async for listing in region_guard(_run_tyson_city(city), city):
             listing['city'] = city['slug']
             yield listing

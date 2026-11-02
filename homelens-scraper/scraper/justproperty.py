@@ -38,7 +38,7 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
-from scraper.cities import CITIES, city_index, city_url
+from scraper.cities import SCRAPE_TARGETS, city_index, city_url, region_guard
 from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.justproperty')
@@ -79,9 +79,11 @@ USER_AGENT = (
 SALE_BASE = BASE_URL + '/results/residential/for-sale/cape-town/'
 RENT_BASE = BASE_URL + '/results/residential/to-let/cape-town/'
 
+# Safety ceiling only: every scraper stops on an empty page or a repeated one. Regions such as
+# Sandton hold hundreds of listings (16 per page), so a low cap silently truncates them.
 MAX_PAGES: dict[str, int] = {
-    'sale': 5,
-    'rent': 5,
+    'sale': 80,
+    'rent': 60,
 }
 
 SCROLL_STEPS   = 10
@@ -419,9 +421,9 @@ async def _run_justproperty_city(city: dict) -> AsyncGenerator[dict, None]:
 
 
 async def run_justproperty_scraper() -> AsyncGenerator[dict, None]:
-    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
-    for city in CITIES:
+    """Scrapes every region of every city (scraper.cities.SCRAPE_TARGETS), tagging each listing with its city."""
+    for city in SCRAPE_TARGETS:
         logger.info('══ justproperty — %s ══', city['name'])
-        async for listing in _run_justproperty_city(city):
+        async for listing in region_guard(_run_justproperty_city(city), city):
             listing['city'] = city['slug']
             yield listing
