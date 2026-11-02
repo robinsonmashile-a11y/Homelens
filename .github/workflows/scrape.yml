@@ -122,6 +122,7 @@ jobs:
 
   engine:
     needs: fix-suburbs
+    if: ${{ !cancelled() && needs.fix-suburbs.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     name: engine
@@ -148,6 +149,7 @@ jobs:
   # cost anything. The script never fails the run (it logs and exits 0).
   maddy:
     needs: engine
+    if: ${{ !cancelled() && needs.engine.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     name: maddy fallback

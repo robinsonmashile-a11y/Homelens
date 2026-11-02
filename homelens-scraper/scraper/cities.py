@@ -102,24 +102,25 @@ def city_index(parts: list[str]) -> int | None:
 
 # A region page that does not exist can silently return the national list. Every listing's
 # URL carries its region, so anything else is dropped, and a region that yields nothing but
-# foreign listings is abandoned instead of paged through.
+# foreign listings, or that runs out of its own listings and carries on with others, is
+# abandoned instead of paged through.
 REGION_PROBE = 40
 
 
 async def region_guard(listings, target: dict):
     """Pass through only listings whose URL is inside `target`'s region."""
     region = target['platform_path']
-    inside = foreign = 0
+    foreign = 0
     try:
         async for listing in listings:
             parts = [p for p in urlparse(listing.get('listing_url') or '').path.split('/') if p]
             if region in parts:
-                inside += 1
+                foreign = 0
                 yield listing
                 continue
             foreign += 1
-            if not inside and foreign >= REGION_PROBE:
-                logger.warning('Region %s returned only foreign listings — skipping it', region)
+            if foreign >= REGION_PROBE:
+                logger.warning('Region %s: %d foreign listings in a row — leaving it', region, foreign)
                 break
     finally:
         await listings.aclose()
