@@ -26,7 +26,7 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
-from scraper.cities import CITIES, city_index, city_url
+from scraper.cities import SCRAPE_TARGETS, city_index, city_url, region_guard
 from scraper.enrich import CostEnricher, read_card_status
 
 logger = logging.getLogger('homelens.seeff')
@@ -73,9 +73,11 @@ SALE_SEARCH_ID = 'e2c1a2f7-a5b9-5184-a318-7964bc399818'
 
 # sale ≈ 310 listings / 16 per page ≈ 20 pages  (max 25 with margin)
 # rent ≈ 441 listings / 16 per page ≈ 28 pages  (max 32 with margin)
+# Safety ceiling only: every scraper stops on an empty page or a repeated one. Regions such as
+# Sandton hold hundreds of listings (16 per page), so a low cap silently truncates them.
 MAX_PAGES: dict[str, int] = {
-    'sale': 25,
-    'rent': 32,
+    'sale': 80,
+    'rent': 60,
 }
 
 SCROLL_STEPS   = 12    # increments to trigger lazy-loaded cards
@@ -357,7 +359,7 @@ async def _run_seeff_city(city: dict) -> AsyncGenerator[dict, None]:
         )
 
         lt_configs = [
-            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['slug'] == 'cape-town' else None),
+            ('sale', city_url(SALE_BASE_PATH, city), SALE_SEARCH_ID if city['platform_path'] == 'cape-town' else None),
             ('rent', city_url(RENT_BASE_PATH, city), None),
         ]
 
@@ -433,9 +435,9 @@ async def _run_seeff_city(city: dict) -> AsyncGenerator[dict, None]:
 
 
 async def run_seeff_scraper() -> AsyncGenerator[dict, None]:
-    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
-    for city in CITIES:
+    """Scrapes every region of every city (scraper.cities.SCRAPE_TARGETS), tagging each listing with its city."""
+    for city in SCRAPE_TARGETS:
         logger.info('══ seeff — %s ══', city['name'])
-        async for listing in _run_seeff_city(city):
+        async for listing in region_guard(_run_seeff_city(city), city):
             listing['city'] = city['slug']
             yield listing

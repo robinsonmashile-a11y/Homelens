@@ -35,7 +35,7 @@ from scraper.utils import (
     compute_price_per_m2,
     validate_image_url,
 )
-from scraper.cities import CITIES, city_index, city_url
+from scraper.cities import SCRAPE_TARGETS, city_index, city_url
 from scraper.detail import DETAIL_FIELDS, LOG_EXPECTED, log_missing
 from scraper.detail_page import apply_details, read_detail_from_page
 from scraper.enrich import apply_costs, read_card_status, read_costs_from_page
@@ -79,9 +79,10 @@ RENT_BASE_URL = BASE_URL + '/property/to-rent/cape-town'
 
 # Approximate listing counts — 20 cards per page.
 # Allow generous upper bounds; pagination stops on empty pages.
+# Safety ceiling only: the scraper stops on an empty or repeated page.
 MAX_PAGES: dict[str, int] = {
-    'sale': 20,
-    'rent': 20,
+    'sale': 80,
+    'rent': 60,
 }
 
 SCROLL_STEPS    = 10     # increments to trigger lazy-loaded cards
@@ -577,8 +578,8 @@ async def _run_rawson_city(city: dict) -> AsyncGenerator[dict, None]:
 
 
 async def run_rawson_scraper() -> AsyncGenerator[dict, None]:
-    """Scrapes every city in scraper.cities.CITIES, tagging each listing with its city."""
-    for city in CITIES:
+    """Scrapes every region of every city (scraper.cities.SCRAPE_TARGETS), tagging each listing with its city."""
+    for city in SCRAPE_TARGETS:
         logger.info('══ rawson — %s ══', city['name'])
         async for listing in _run_rawson_city(city):
             listing['city'] = city['slug']
