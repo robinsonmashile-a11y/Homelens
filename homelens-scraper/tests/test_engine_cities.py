@@ -45,6 +45,9 @@ class _Query:
     def limit(self, *_a):
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
     def range(self, a, b):
         self.window = (a, b)
         return self
