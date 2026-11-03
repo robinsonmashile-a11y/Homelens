@@ -191,6 +191,16 @@ def test_default_city_is_cape_town_and_old_behaviour_is_unchanged():
     assert stats['total'] == 8                                    # the 8 Cape Town listings only
 
 
+def test_every_signal_row_carries_its_listings_city():
+    db = FakeDB(_market())
+    for city in ('cape-town', 'johannesburg'):
+        base = engine.compute_suburb_baselines(db, city, store_city=True)
+        engine.compute_listing_signals(db, base, {}, city=city, clear=(city == 'cape-town'))
+    cities = {s['listing_id']: s['city'] for s in db.tables['listing_signals']}
+    assert cities['ca3'] == 'cape-town' and cities['jo3'] == 'johannesburg' and cities['jo90'] == 'johannesburg'
+    assert all(cities[i] == ('cape-town' if i.startswith('ca') else 'johannesburg') for i in cities)
+
+
 def _run_engine(db, monkeypatch):
     monkeypatch.setattr(engine, '_supabase', lambda: db)
     monkeypatch.setattr(engine, 'check_schema', lambda c: True)
