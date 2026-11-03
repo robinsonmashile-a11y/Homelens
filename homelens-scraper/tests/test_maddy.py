@@ -139,6 +139,7 @@ def test_full_pass_writes_only_unscored_and_is_idempotent():
     assert (rep['engine_scored'], rep['maddy_scored'], rep['written']) == (1, 2, 2) and ai.calls == 2
     by = {r['listing_id']: r for r in db.tables['listing_signals']}
     assert by['l1']['scored_by'] == 'engine' and by['l2']['scored_by'] == 'maddy'
+    assert by['l2']['city'] == ls[1]['city'] and by['l3']['city'] == ls[2]['city']
     again = maddy.run_fallback(db, ai)
     assert again['skipped_unchanged'] == 2 and again['maddy_scored'] == 0 and ai.calls == 2
 

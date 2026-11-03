@@ -202,6 +202,7 @@ def build_signal_row(listing: dict, clean: dict, h: str, now_iso: str) -> dict:
     """Engine-shaped listing_signals row; every statistical field is left out (NULL)."""
     return {
         'listing_id':        listing['listing_id'],
+        'city':              listing.get('city'),
         'suburb_normalised': listing.get('suburb_normalised'),
         'listing_type':      listing.get('listing_type') or 'sale',
         'bedrooms':          listing.get('bedrooms'),
@@ -321,7 +322,22 @@ def drop_listings_with_engine_rows(client, ids: list[str]) -> set[str]:
     return gained
 
 
+def _signals_have_city(client) -> bool:
+    """True once supabase/migrations/signals_city.sql has been applied."""
+    try:
+        client.table('listing_signals').select('city').limit(1).execute()
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ('pgrst204', '42703', 'schema cache', 'could not find', 'does not exist')):
+            return False
+        raise
+
+
 def write_rows(client, rows: list[dict]) -> int:
+    if not _signals_have_city(client):
+        logger.warning('listing_signals.city missing — run supabase/migrations/signals_city.sql')
+        rows = [{k: v for k, v in r.items() if k != 'city'} for r in rows]
     written = 0
     for i in range(0, len(rows), WRITE_BATCH):
         batch = rows[i:i + WRITE_BATCH]

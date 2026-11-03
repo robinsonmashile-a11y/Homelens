@@ -1019,6 +1019,17 @@ def _signals_have_scored_by(client) -> bool:
         raise
 
 
+def _signals_have_city(client) -> bool:
+    """True once supabase/migrations/signals_city.sql has been applied."""
+    try:
+        client.table('listing_signals').select('city').limit(1).execute()
+        return True
+    except Exception as e:
+        if _is_schema_error(e):
+            return False
+        raise
+
+
 def _get_attractiveness_map(client) -> dict[str, int]:
     """
     Fetch suburb_attractiveness table.
@@ -1402,6 +1413,14 @@ def compute_listing_signals(
     if has_scored_by:
         for r in signal_rows:
             r.update(scored_by='engine', maddy_reason=None, maddy_what_it_is=None, input_hash=None)
+
+    # Every signal carries the city of the listing it scores (every row of this pass was
+    # selected with .eq('city', city)), so a city's scores never need a suburb-name match.
+    if _signals_have_city(client):
+        for r in signal_rows:
+            r['city'] = city
+    else:
+        logger.warning('  listing_signals.city missing — run supabase/migrations/signals_city.sql')
 
     # ── Batch upsert ──────────────────────────────────────────────────────────
     upserted   = 0
